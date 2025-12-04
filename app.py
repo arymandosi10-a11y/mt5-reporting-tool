@@ -186,4 +186,8 @@ if st.button("🚀 Generate Report"):
 
             # Convert to Excel for download
             output = BytesIO()
-            with pd.ExcelWriter(output, engine="openpy
+            output = BytesIO()
+with pd.ExcelWriter(output, engine="openpyxl") as writer:
+    report_df.to_excel(writer, index=False, sheet_name="Report")
+output.seek(0)
+
