@@ -47,7 +47,7 @@ def load_equity_report(file) -> pd.DataFrame:
 
 def build_report(trade_df, closing_df, opening_df) -> pd.DataFrame:
     """Join datasets + compute PNL, DP/WD, Closed Lots, etc."""
-    
+
     # Start with closing equity
     report = closing_df.rename(
         columns={"Equity": "Net Equity New", "Currency": "Currency"}
@@ -135,6 +135,7 @@ def build_report(trade_df, closing_df, opening_df) -> pd.DataFrame:
     report = report.sort_values("Login").reset_index(drop=True)
     return report
 
+
 # ---------- UI Layout ----------
 
 col1, col2, col3 = st.columns(3)
@@ -184,29 +185,6 @@ if st.button("🚀 Generate Report"):
             st.subheader("📋 Report Preview (first 100 rows)")
             st.dataframe(report_df.head(100), use_container_width=True)
 
-            # Convert to Excel for download
-            output = BytesIO()
-            output = BytesIO()
-with pd.ExcelWriter(output, engine="openpyxl") as writer:
-    report_df.to_excel(writer, index=False, sheet_name="Report")
-output.seek(0)
-if st.button("🚀 Generate Report"):
-    if not (trade_file and closing_file and opening_file):
-        st.error("Please upload all three files before generating the report.")
-    else:
-        try:
-            with st.spinner("Processing files & calculating PNL..."):
-                trade_df = load_trade_accounts(trade_file)
-                closing_df = load_equity_report(closing_file)
-                opening_df = load_equity_report(opening_file)
-
-                report_df = build_report(trade_df, closing_df, opening_df)
-
-            st.success("Report generated successfully!")
-
-            st.subheader("📋 Report Preview (first 100 rows)")
-            st.dataframe(report_df.head(100), use_container_width=True)
-
             # Convert to Excel
             output = BytesIO()
             with pd.ExcelWriter(output, engine="openpyxl") as writer:
@@ -223,4 +201,3 @@ if st.button("🚀 Generate Report"):
 
         except Exception as e:
             st.error(f"❌ Error while generating report: {e}")
-
