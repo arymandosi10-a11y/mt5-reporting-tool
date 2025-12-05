@@ -1,4 +1,3 @@
-code = r'''
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -90,7 +89,7 @@ def load_summary_sheet(file) -> pd.DataFrame:
     df["Login"] = pd.to_numeric(raw.iloc[:, 0], errors="coerce").astype("Int64")
     df["Deposit"] = pd.to_numeric(raw.iloc[:, 2], errors="coerce").fillna(0.0)
     df["Withdrawal"] = pd.to_numeric(raw.iloc[:, 5], errors="coerce").fillna(0.0)
-    # Full volume (optional, not strictly needed now)
+    # Full volume (optional)
     df["VolumeFull"] = pd.to_numeric(raw.iloc[:, 8], errors="coerce").fillna(0.0)
     # Volume in+out (column J) used for Closed Lots
     df["VolumeInOut"] = pd.to_numeric(raw.iloc[:, 9], errors="coerce").fillna(0.0)
@@ -242,7 +241,7 @@ def build_report(summary_df, closing_df, opening_df, accounts_df, eod_label: str
     # NET DP/WD (cash flow)
     report["NET DP/WD"] = report["Deposit"] - report["Withdrawal"]
 
-    # NET PNL USD
+    # NET PNL USD = CE - OE - (Deposit - Withdrawal)
     report["NET PNL USD"] = (
         report["Closing Equity"] - report["Opening Equity"] - report["NET DP/WD"]
     )
@@ -305,7 +304,6 @@ def build_book_summary(account_df: pd.DataFrame) -> pd.DataFrame:
         )
         .reset_index()
     )
-    # Also compute difference between A-Book and B-Book for display later
     return book
 
 
@@ -503,6 +501,3 @@ if st.button("🚀 Generate report"):
 
         except Exception as e:
             st.error(f"❌ Error while generating report: {e}")
-'''
-print("syntax ok")
-
