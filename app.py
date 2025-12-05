@@ -1,3 +1,4 @@
+code = r'''
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -49,12 +50,11 @@ body, .main {
 
 st.title("📊 Client P&L Monitoring")
 st.caption(
-    "Upload your MT5 daily exports + A-Book / B-Book / Hybrid account lists to see account, "
-    "group and book level P&L, including A-Book vs LP brokerage."
+    "Upload your MT5 daily exports + book-account lists to see account, group and book level P&L."
 )
 
 # ---------------------------------------------------------
-# HELPER FUNCTIONS
+# HELPERS
 # ---------------------------------------------------------
 def load_summary_sheet(file) -> pd.DataFrame:
     """
@@ -64,7 +64,7 @@ def load_summary_sheet(file) -> pd.DataFrame:
         0: Login
         2: Deposit (C)
         5: Withdrawal (F)
-        7: Closed volume (H)   -> will be divided by 2 for Closed Lots
+        7: Closed volume (H)          -> will be divided by 2 for Closed Lots
         10: Commission (K)
         12: Swap (M)
     """
@@ -78,7 +78,9 @@ def load_summary_sheet(file) -> pd.DataFrame:
             raw = pd.read_excel(file)
 
     if raw.shape[1] < 13:
-        raise ValueError("Summary sheet must have at least 13 columns (up to column M).")
+        raise ValueError(
+            "Summary sheet must have at least 13 columns (up to column M)."
+        )
 
     df = pd.DataFrame()
     df["Login"] = pd.to_numeric(raw.iloc[:, 0], errors="coerce").astype("Int64")
@@ -137,9 +139,7 @@ def load_equity_sheet(file) -> pd.DataFrame:
 
 
 def _read_accounts_file(file) -> pd.DataFrame:
-    """
-    Read a book-accounts file: expect Login and optional Group.
-    """
+    """Read a book-accounts file: expect Login and optional Group."""
     name = file.name.lower()
     if name.endswith(".csv"):
         df = pd.read_csv(file)
@@ -164,6 +164,7 @@ def _read_accounts_file(file) -> pd.DataFrame:
 
 def load_book_accounts(file, book_type: str) -> pd.DataFrame:
     df = _read_accounts_file(file)
+    df["OrigType"] = book_type
     df["Type"] = book_type
     return df
 
@@ -171,10 +172,6 @@ def load_book_accounts(file, book_type: str) -> pd.DataFrame:
 def build_report(summary_df, closing_df, opening_df, accounts_df, shift_df, eod_label):
     """
     Merge all sources and calculate account-level metrics.
-
-    NET DP/WD  = Deposit - Withdrawal
-    NET PNL USD = Closing Equity - Opening Equity - NET DP/WD
-    Closed Lots = ClosedVolume / 2  (from Summary H column)
     """
     base = closing_df.rename(
         columns={"Equity": "Closing Equity", "Currency": "Currency"}
@@ -183,10 +180,10 @@ def build_report(summary_df, closing_df, opening_df, accounts_df, shift_df, eod_
     base = base.merge(open_renamed[["Login", "Opening Equity"]], on="Login", how="left")
     base = base.merge(summary_df, on="Login", how="left")
 
-    # Start from accounts (only the accounts we care about)
+    # start from accounts (only the accounts we care about)
     report = accounts_df.merge(base, on="Login", how="left")
 
-    # Numeric safety
+    # numeric safety
     for col in [
         "Closing Equity",
         "Opening Equity",
@@ -201,7 +198,7 @@ def build_report(summary_df, closing_df, opening_df, accounts_df, shift_df, eod_
         else:
             report[col] = 0.0
 
-    # Closed lots from Summary H column
+    # Closed lots from summary H column
     report["Closed Lots"] = report["ClosedVolume"] / 2.0
 
     # NET DP/WD
@@ -212,29 +209,34 @@ def build_report(summary_df, closing_df, opening_df, accounts_df, shift_df, eod_
         report["Closing Equity"] - report["Opening Equity"] - report["NET DP/WD"]
     )
 
-    # NET PNL % vs absolute opening equity
+    # NET PNL %
     report["NET PNL %"] = np.where(
         report["Opening Equity"].abs() > 0,
         (report["NET PNL USD"] / report["Opening Equity"].abs()) * 100.0,
         0.0,
     )
 
-    # Apply book switches – override Type and store shift equity
+    # Shifts
     report["ShiftEquity"] = np.nan
+    report["ShiftFromType"] = np.nan
+    report["ShiftToType"] = np.nan
     if shift_df is not None and not shift_df.empty:
-        # override type where login matches
-        type_map = shift_df.set_index("Login")["ToType"].to_dict()
-        eq_map = shift_df.set_index("Login")["ShiftEquity"].to_dict()
-        report["Type"] = report.apply(
-            lambda r: type_map.get(r["Login"], r["Type"]), axis=1
+        report = report.merge(shift_df, on="Login", how="left", how_suffixes=("", "_shift"))
+        # Columns in shift_df: Login, FromType, ToType, ShiftEquity
+        report["ShiftEquity"] = report["ShiftEquity"].astype(float)
+        report["ShiftFromType"] = report["FromType"]
+        report["ShiftToType"] = report["ToType"]
+        # Override final Type where ToType is present
+        report["Type"] = np.where(
+            report["ShiftToType"].notna(), report["ShiftToType"], report["Type"]
         )
-        report["ShiftEquity"] = report["Login"].map(eq_map)
 
     report["EOD Closing Equity Date"] = eod_label
 
     final_cols = [
         "Login",
         "Group",
+        "OrigType",
         "Type",
         "Closed Lots",
         "NET DP/WD",
@@ -247,6 +249,8 @@ def build_report(summary_df, closing_df, opening_df, accounts_df, shift_df, eod_
         "Withdrawal",
         "Commission",
         "Swap",
+        "ShiftFromType",
+        "ShiftToType",
         "ShiftEquity",
         "EOD Closing Equity Date",
     ]
@@ -270,14 +274,66 @@ def build_group_summary(account_df: pd.DataFrame) -> pd.DataFrame:
 
 
 def build_book_summary(account_df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Allocate P&L between books, splitting accounts that switched book using ShiftEquity.
+
+    Logic for a switched account:
+      - Total daily P&L (net_pnl) is as usual.
+      - P&L for NEW book  = ClosingEquity − ShiftEquity
+      - P&L for OLD book  = net_pnl − P&L_new
+    """
+    rows = []
+    for _, r in account_df.iterrows():
+        net_pnl = r["NET PNL USD"]
+        closed_lots = r["Closed Lots"]
+        opening = r["Opening Equity"]
+        closing = r["Closing Equity"]
+        orig_type = r["OrigType"]
+        final_type = r["Type"]
+        shift_eq = r["ShiftEquity"]
+
+        if pd.isna(shift_eq) or pd.isna(r["ShiftToType"]) or orig_type == final_type:
+            # no switch
+            rows.append(
+                {
+                    "Type": final_type,
+                    "Accounts": 1,
+                    "Closed_Lots": closed_lots,
+                    "NET_PNL_USD": net_pnl,
+                }
+            )
+        else:
+            # switched
+            pnl_new = closing - shift_eq
+            pnl_old = net_pnl - pnl_new
+
+            # old book (no account count here)
+            rows.append(
+                {
+                    "Type": r["ShiftFromType"],
+                    "Accounts": 0,
+                    "Closed_Lots": 0.0,
+                    "NET_PNL_USD": pnl_old,
+                }
+            )
+            # new book (account counted here)
+            rows.append(
+                {
+                    "Type": r["ShiftToType"],
+                    "Accounts": 1,
+                    "Closed_Lots": closed_lots,
+                    "NET_PNL_USD": pnl_new,
+                }
+            )
+
+    contrib = pd.DataFrame(rows)
     book = (
-        account_df.groupby("Type")
+        contrib.groupby("Type", as_index=False)
         .agg(
-            Accounts=("Login", "nunique"),
-            Closed_Lots=("Closed Lots", "sum"),
-            NET_PNL_USD=("NET PNL USD", "sum"),
+            Accounts=("Accounts", "sum"),
+            Closed_Lots=("Closed_Lots", "sum"),
+            NET_PNL_USD=("NET_PNL_USD", "sum"),
         )
-        .reset_index()
     )
     return book
 
@@ -288,8 +344,7 @@ def build_book_summary(account_df: pd.DataFrame) -> pd.DataFrame:
 with st.sidebar:
     st.header("A-Book LP P&L (optional)")
     st.caption(
-        "If you fill this, the tool will show A-Book brokerage P&L = Client A-Book P&L − LP P&L "
-        "and also export it into Excel."
+        "If you fill this, the tool will show A-book brokerage P&L vs your LP."
     )
     lp_open = st.number_input("LP opening equity", value=0.0, step=100.0)
     lp_close = st.number_input("LP closing equity", value=0.0, step=100.0)
@@ -309,13 +364,14 @@ eod_label = st.text_input(
 
 c1, c2 = st.columns(2)
 c3, c4 = st.columns(2)
+c5, c6, c7 = st.columns(3)
 
 with c1:
     summary_file = st.file_uploader(
         "Sheet 1 – Summary / Transactions",
         type=["xlsx", "xls", "csv"],
         key="summary",
-        help="Includes Login, Deposit (C), Withdrawal (F), Closed Volume (H), Commission (K), Swap (M).",
+        help="Includes Deposit, Withdrawal, Closed volume (H), Commission, Swap.",
     )
 with c2:
     closing_file = st.file_uploader(
@@ -332,9 +388,6 @@ with c3:
         help="Previous EOD equity snapshot (used as opening equity).",
     )
 
-st.markdown("### 2️⃣ Book account lists")
-
-c5, c6, c7 = st.columns(3)
 with c5:
     a_book_file = st.file_uploader(
         "A-Book accounts",
@@ -355,60 +408,31 @@ with c7:
         key="hybrid",
     )
 
-# ---------------------------------------------------------
-# BOOK SWITCH OVERRIDES (INLINE)
-# ---------------------------------------------------------
-st.markdown("### 3️⃣ Book switch overrides (optional)")
+st.markdown("#### Book switch overrides (optional – for a single login)")
+switch_enabled = st.checkbox("Enable single account switch in this report")
 
-switch_moves = {
-    "A-Book → B-Book": ("A-Book", "B-Book"),
-    "A-Book → Hybrid": ("A-Book", "Hybrid"),
-    "B-Book → A-Book": ("B-Book", "A-Book"),
-    "B-Book → Hybrid": ("B-Book", "Hybrid"),
-    "Hybrid → A-Book": ("Hybrid", "A-Book"),
-    "Hybrid → B-Book": ("Hybrid", "B-Book"),
+DIRECTION_OPTIONS = {
+    "A Book → B Book": ("A-Book", "B-Book"),
+    "A Book → Hybrid": ("A-Book", "Hybrid"),
+    "B Book → A Book": ("B-Book", "A-Book"),
+    "B Book → Hybrid": ("B-Book", "Hybrid"),
+    "Hybrid → A Book": ("Hybrid", "A-Book"),
+    "Hybrid → B Book": ("Hybrid", "B-Book"),
 }
 
-shift_rows = []
+switch_direction = None
+switch_login = None
+switch_equity = None
 
-with st.expander("Add single-day account book switches (optional)"):
-    st.caption(
-        "Use this if an account moved between A-Book / B-Book / Hybrid during this period. "
-        "Enter the login and the equity **at the time of switch**. "
-        "For this report we assign the whole day P&L to the destination book, "
-        "but keep the switch equity for reference."
+if switch_enabled:
+    switch_direction = st.selectbox(
+        "Switch direction",
+        list(DIRECTION_OPTIONS.keys()),
     )
-    for i in range(1, 6):  # up to 5 switches per run
-        col1, col2, col3 = st.columns((2.3, 1.2, 1.5))
-        enabled = col1.checkbox(f"Enable row {i}", key=f"shift_enable_{i}", value=False)
-        if enabled:
-            move_label = col1.selectbox(
-                "Move type",
-                list(switch_moves.keys()),
-                key=f"shift_move_{i}",
-            )
-            login = col2.number_input(
-                "Login",
-                min_value=0,
-                step=1,
-                key=f"shift_login_{i}",
-            )
-            shift_eq = col3.number_input(
-                "Shift equity",
-                value=0.0,
-                step=100.0,
-                key=f"shift_eq_{i}",
-            )
-            if login > 0:
-                from_type, to_type = switch_moves[move_label]
-                shift_rows.append(
-                    {
-                        "Login": int(login),
-                        "FromType": from_type,
-                        "ToType": to_type,
-                        "ShiftEquity": shift_eq,
-                    }
-                )
+    switch_login = st.text_input("Account login to switch")
+    switch_equity = st.number_input(
+        "Equity at moment of switch (Shift equity)", value=0.0, step=100.0
+    )
 
 st.markdown("---")
 
@@ -429,7 +453,6 @@ if st.button("🚀 Generate report"):
                 closing_df = load_equity_sheet(closing_file)
                 opening_df = load_equity_sheet(opening_file)
 
-                # Build accounts mapping from up to three lists
                 accounts_frames = []
                 if a_book_file:
                     accounts_frames.append(load_book_accounts(a_book_file, "A-Book"))
@@ -439,11 +462,28 @@ if st.button("🚀 Generate report"):
                     accounts_frames.append(load_book_accounts(hybrid_file, "Hybrid"))
 
                 accounts_df = pd.concat(accounts_frames, ignore_index=True)
-                # If an account appears multiple times across books keep the first mapping
                 accounts_df = accounts_df.drop_duplicates(subset=["Login"], keep="first")
 
-                # Book switches built from the UI
-                shift_df = pd.DataFrame(shift_rows) if shift_rows else None
+                # Build shift_df from manual override
+                shift_df = None
+                if switch_enabled and switch_login.strip():
+                    try:
+                        login_val = int(str(switch_login).strip())
+                        from_type, to_type = DIRECTION_OPTIONS[switch_direction]
+                        shift_df = pd.DataFrame(
+                            [
+                                {
+                                    "Login": login_val,
+                                    "FromType": from_type,
+                                    "ToType": to_type,
+                                    "ShiftEquity": float(switch_equity),
+                                }
+                            ]
+                        )
+                    except ValueError:
+                        st.warning(
+                            "Could not read the switch login as a number – ignoring the switch override."
+                        )
 
                 account_df = build_report(
                     summary_df, closing_df, opening_df, accounts_df, shift_df, eod_label
@@ -452,7 +492,7 @@ if st.button("🚀 Generate report"):
                 book_df = build_book_summary(account_df)
 
             # ---------------- KPIs ----------------
-            st.markdown("### 4️⃣ Overview")
+            st.markdown("### 2️⃣ Overview")
 
             k1, k2, k3, k4 = st.columns(4)
             total_clients = account_df["Login"].nunique()
@@ -464,28 +504,19 @@ if st.button("🚀 Generate report"):
             with k1:
                 st.markdown('<div class="metric-card">', unsafe_allow_html=True)
                 st.markdown('<div class="metric-label">Clients</div>', unsafe_allow_html=True)
-                st.markdown(
-                    f'<div class="metric-value">{int(total_clients)}</div>',
-                    unsafe_allow_html=True,
-                )
+                st.markdown(f'<div class="metric-value">{int(total_clients)}</div>', unsafe_allow_html=True)
                 st.markdown("</div>", unsafe_allow_html=True)
 
             with k2:
                 st.markdown('<div class="metric-card">', unsafe_allow_html=True)
                 st.markdown('<div class="metric-label">Closed lots</div>', unsafe_allow_html=True)
-                st.markdown(
-                    f'<div class="metric-value">{total_closed_lots:,.2f}</div>',
-                    unsafe_allow_html=True,
-                )
+                st.markdown(f'<div class="metric-value">{total_closed_lots:,.2f}</div>', unsafe_allow_html=True)
                 st.markdown("</div>", unsafe_allow_html=True)
 
             with k3:
                 st.markdown('<div class="metric-card">', unsafe_allow_html=True)
                 st.markdown('<div class="metric-label">Net client P&L</div>', unsafe_allow_html=True)
-                st.markdown(
-                    f'<div class="metric-value">{net_pnl:,.2f}</div>',
-                    unsafe_allow_html=True,
-                )
+                st.markdown(f'<div class="metric-value">{net_pnl:,.2f}</div>', unsafe_allow_html=True)
                 st.markdown("</div>", unsafe_allow_html=True)
 
             with k4:
@@ -509,17 +540,20 @@ if st.button("🚀 Generate report"):
             chart_data = pd.DataFrame(
                 {"Side": ["Profit", "Loss"], "Amount": [profit_abs, loss_abs]}
             ).set_index("Side")
-            st.markdown("### 5️⃣ Profit vs loss chart")
+            st.markdown("### 3️⃣ Profit vs loss chart")
             st.bar_chart(chart_data)
 
+            # ---------------- Full accounts table ----------------
+            st.markdown("### 4️⃣ Full account P&L")
+            st.dataframe(account_df, use_container_width=True)
+
             # ---------------- Book summary ----------------
-            st.markdown("### 6️⃣ A-Book / B-Book / Hybrid summary")
+            st.markdown("### 5️⃣ A-Book / B-Book / Hybrid summary")
             st.dataframe(book_df, use_container_width=True)
 
             pnl_a = book_df.loc[book_df["Type"] == "A-Book", "NET_PNL_USD"].sum()
             pnl_b = book_df.loc[book_df["Type"] == "B-Book", "NET_PNL_USD"].sum()
             pnl_h = book_df.loc[book_df["Type"] == "Hybrid", "NET_PNL_USD"].sum()
-
             total_client_pnl = pnl_a + pnl_b + pnl_h
             client_result = "profit" if total_client_pnl >= 0 else "loss"
             st.markdown(
@@ -527,106 +561,76 @@ if st.button("🚀 Generate report"):
                 f"{total_client_pnl:,.2f} ({client_result})**"
             )
 
-            # ---------------- A-Book vs LP brokerage ----------------
-            lp_pnl = lp_close - lp_open - lp_net_dp
-            brokerage_pnl = pnl_a - lp_pnl
-
-            if any([lp_open, lp_close, lp_net_dp]):
-                st.markdown("### 7️⃣ A-Book vs LP brokerage")
-                st.markdown(
-                    f"- Client A-Book P&L: **{pnl_a:,.2f}**  \n"
-                    f"- LP P&L (Close − Open − Net D/W): **{lp_pnl:,.2f}**  \n"
-                    f"- **Brokerage P&L = A-Book − LP = {brokerage_pnl:,.2f}**"
-                )
-
-            # ---------------- Top accounts ----------------
-            st.markdown("### 8️⃣ Top 10 accounts")
-
-            cols_show = [
-                "Login",
-                "Group",
-                "Type",
-                "Opening Equity",
-                "Closing Equity",
-                "NET PNL USD",
-                "NET PNL %",
-                "Closed Lots",
-                "NET DP/WD",
-            ]
-            gcol, lcol = st.columns(2)
-            with gcol:
-                st.markdown("**Top 10 gainers (accounts)**")
-                st.dataframe(
-                    account_df.sort_values("NET PNL USD", ascending=False).head(10)[
-                        cols_show
-                    ],
-                    use_container_width=True,
-                )
-            with lcol:
-                st.markdown("**Top 10 losers (accounts)**")
-                st.dataframe(
-                    account_df.sort_values("NET PNL USD", ascending=True).head(10)[
-                        cols_show
-                    ],
-                    use_container_width=True,
-                )
-
-            # ---------------- Group summary ----------------
-            st.markdown("### 9️⃣ Group-wise summary")
-            st.dataframe(group_df, use_container_width=True)
-
-            g1, g2 = st.columns(2)
-            with g1:
+            # ---------------- Top groups (gainer/loser) ----------------
+            st.markdown("### 6️⃣ Top groups by P&L")
+            gcol1, gcol2 = st.columns(2)
+            with gcol1:
                 st.markdown("**Top 10 profit groups**")
-                top_groups_profit = group_df.sort_values(
-                    "NET_PNL_USD", ascending=False
-                ).head(10)
-                st.dataframe(top_groups_profit, use_container_width=True)
-            with g2:
+                st.dataframe(
+                    group_df.sort_values("NET_PNL_USD", ascending=False).head(10),
+                    use_container_width=True,
+                )
+            with gcol2:
                 st.markdown("**Top 10 loss groups**")
-                top_groups_loss = group_df.sort_values(
-                    "NET_PNL_USD", ascending=True
-                ).head(10)
-                st.dataframe(top_groups_loss, use_container_width=True)
+                st.dataframe(
+                    group_df.sort_values("NET_PNL_USD", ascending=True).head(10),
+                    use_container_width=True,
+                )
 
-            # ---------------- Full account table ----------------
-            st.markdown("### 🔟 Full account P&L table (first 500 rows)")
-            st.dataframe(account_df.head(500), use_container_width=True)
+            # ---------------- A-Book vs LP brokerage ----------------
+            st.markdown("### 7️⃣ A-Book vs LP brokerage")
+            st.markdown(f"- Client A-Book P&L: **{pnl_a:,.2f}**")
 
-            # ---------------- Download Excel ----------------
-            st.markdown("### ⬇️ Download Excel")
-
-            lp_summary_df = pd.DataFrame(
-                {
-                    "Metric": [
-                        "Client_A_Book_PnL",
-                        "LP_Opening_Equity",
-                        "LP_Closing_Equity",
-                        "LP_NET_DP_WD",
-                        "LP_PnL",
-                        "Brokerage_PnL",
-                    ],
-                    "Value": [
-                        pnl_a,
-                        lp_open,
-                        lp_close,
-                        lp_net_dp,
-                        lp_pnl,
-                        brokerage_pnl,
-                    ],
-                }
+            lp_pnl = lp_close - lp_open - lp_net_dp
+            st.markdown(
+                f"- LP P&L (Close − Open − Net D/W): **{lp_pnl:,.2f}**"
             )
 
+            brokerage_broker = pnl_a - lp_pnl
+            brokerage_client = -brokerage_broker
+            st.markdown(
+                f"- Brokerage P&L (broker view = A-Book − LP): **{brokerage_broker:,.2f}**"
+            )
+            st.markdown(
+                f"- Brokerage P&L (client view = LP − A-Book): **{brokerage_client:,.2f}**"
+            )
+
+            # ---------------- Download Excel ----------------
+            st.markdown("### 8️⃣ Download Excel")
             output = BytesIO()
             with pd.ExcelWriter(output, engine="openpyxl") as writer:
                 account_df.to_excel(writer, index=False, sheet_name="Accounts")
                 group_df.to_excel(writer, index=False, sheet_name="Groups")
                 book_df.to_excel(writer, index=False, sheet_name="Books")
-                lp_summary_df.to_excel(writer, index=False, sheet_name="Abook_vs_LP")
-            output.seek(0)
 
+                # A-book vs LP sheet
+                abook_lp_df = pd.DataFrame(
+                    {
+                        "Metric": [
+                            "Client_A_Book_PnL",
+                            "LP_Opening_Equity",
+                            "LP_Closing_Equity",
+                            "LP_NET_DP_WD",
+                            "LP_PnL",
+                            "Brokerage_PnL_BrokerView",
+                            "Brokerage_PnL_ClientView",
+                        ],
+                        "Value": [
+                            pnl_a,
+                            lp_open,
+                            lp_close,
+                            lp_net_dp,
+                            lp_pnl,
+                            brokerage_broker,
+                            brokerage_client,
+                        ],
+                    }
+                )
+                abook_lp_df.to_excel(writer, index=False, sheet_name="Abook_vs_LP")
+
+            output.seek(0)
             st.download_button(
-                "Download Excel report",
+                "⬇️ Download Excel report",
                 data=output,
                 file_name=f"Client_PnL_Report_{eod_label.replace(' ', '_')}.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -634,3 +638,6 @@ if st.button("🚀 Generate report"):
 
         except Exception as e:
             st.error(f"❌ Error while generating report: {e}")
+'''
+print("syntax ok")
+
