@@ -1,4 +1,3 @@
-code = r'''
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -10,11 +9,12 @@ from io import BytesIO
 st.set_page_config(
     page_title="Client P&L Monitoring Tool",
     layout="wide",
-    initial_sidebar_state="expanded"
+    initial_sidebar_state="expanded",
 )
 
 # Simple light theme styling
-st.markdown("""
+st.markdown(
+    """
 <style>
 body, .main {
     background-color: #f7f7fb;
@@ -50,43 +50,42 @@ body, .main {
     margin-top: 0.15rem;
 }
 </style>
-""", unsafe_allow_html=True)
+""",
+    unsafe_allow_html=True,
+)
 
 st.title("📊 Client P&L Monitoring")
-
 st.caption(
-    "Upload your daily MT5 exports to generate account-wise and book-wise P&L for A-Book, B-Book and Hybrid clients."
+    "Upload daily MT5 exports + A / B / Hybrid account lists to monitor client P&L."
 )
 
 # ---------------------------------------------------------
-# HELPER FUNCTIONS
+# HELPERS
 # ---------------------------------------------------------
-def load_summary_sheet(file) -> pd.DataFrame:
+def load_summary_sheet(file: BytesIO) -> pd.DataFrame:
     """
-    Sheet 1: Summary / Transactions
-
-    Expected column positions (0-based index):
-        0: Login
-        2: Deposit (C)
-        5: Withdrawal (F)
-        8: Volume full lots (I)            [optional]
-        9: Volume in+out deals (J)         [used for Closed Lots]
+    Sheet 1 – Summary / Transactions.
+    Required positions (0-based index):
+        0 : Login
+        2 : Deposit   (C)
+        5 : Withdrawal (F)
+        8 : VolumeFull (I)        – optional
+        9 : VolumeInOut (J)       – in+out lots
         10: Commission (K)
         12: Swap (M)
-
-    We group by Login because there may be multiple rows per account.
     """
     name = file.name.lower()
     if name.endswith(".csv"):
         raw = pd.read_csv(file)
     else:
+        # Most MT5 reports have 2 header rows, but if that fails, read default.
         try:
             raw = pd.read_excel(file, header=2)
         except Exception:
             raw = pd.read_excel(file)
 
     if raw.shape[1] < 13:
-        raise ValueError("Summary sheet must have at least 13 columns (up to column M).")
+        raise ValueError("Summary sheet must have at least 13 columns (till column M).")
 
     df = pd.DataFrame()
     df["Login"] = pd.to_numeric(raw.iloc[:, 0], errors="coerce").astype("Int64")
@@ -106,10 +105,10 @@ def load_summary_sheet(file) -> pd.DataFrame:
     return grouped
 
 
-def load_equity_sheet(file) -> pd.DataFrame:
+def load_equity_sheet(file: BytesIO) -> pd.DataFrame:
     """
-    Sheet 2 & 3: Daily Reports (EOD equity snapshots)
-    Expect columns: Login, Equity, Currency.
+    Sheet 2 / 3 – Daily report (EOD equity snapshot).
+    We only need Login, Equity and Currency.
     """
     try:
         df = pd.read_excel(file, header=2)
@@ -124,12 +123,12 @@ def load_equity_sheet(file) -> pd.DataFrame:
                 return df.columns[cols_lower.index(opt)]
         if default_idx is not None and default_idx < len(df.columns):
             return df.columns[default_idx]
-        raise ValueError(f"Could not find column for {name_options}")
+        raise ValueError(f"Could not find column for any of: {name_options}")
 
     login_col = find_col(["login"], 0)
-    equity_col = find_col(["equity"], 9)  # column J ~ index 9
+    equity_col = find_col(["equity"], 9)  # J column is common in MT5 reports
     currency_col = None
-    for opt in ["currency", "curr", "ccy"]:
+    for opt in ("currency", "curr", "ccy"):
         if opt in cols_lower:
             currency_col = df.columns[cols_lower.index(opt)]
             break
@@ -144,10 +143,10 @@ def load_equity_sheet(file) -> pd.DataFrame:
     return out
 
 
-def _read_accounts_file(file) -> pd.DataFrame:
+def _read_accounts_file(file: BytesIO) -> pd.DataFrame:
     """
-    Helper to read a book-accounts file.
-    We expect at least a Login column; Group is optional.
+    Helper to read A-Book / B-Book / Hybrid account lists.
+    At minimum we need a Login column; Group is optional.
     """
     name = file.name.lower()
     if name.endswith(".csv"):
@@ -162,9 +161,8 @@ def _read_accounts_file(file) -> pd.DataFrame:
         df = df.rename(columns={lower_cols["group"]: "Group"})
 
     if "Login" not in df.columns:
-        # Fallback: assume first column is login
+        # Fallback: treat first column as Login
         df = df.rename(columns={df.columns[0]: "Login"})
-
     if "Group" not in df.columns:
         df["Group"] = ""
 
@@ -173,43 +171,38 @@ def _read_accounts_file(file) -> pd.DataFrame:
     return out
 
 
-def load_book_accounts(file, book_type: str) -> pd.DataFrame:
-    """
-    Load a list of accounts for a specific book (A-Book, B-Book, Hybrid).
-    """
+def load_book_accounts(file: BytesIO, book_type: str) -> pd.DataFrame:
     df = _read_accounts_file(file)
     df["Type"] = book_type
     return df
 
 
-def build_report(summary_df, closing_df, opening_df, accounts_df, eod_label: str):
+def build_report(
+    summary_df: pd.DataFrame,
+    closing_df: pd.DataFrame,
+    opening_df: pd.DataFrame,
+    accounts_df: pd.DataFrame,
+    eod_label: str,
+) -> pd.DataFrame:
     """
-    Combine all sheets & compute per-account metrics.
+    Combine all inputs into per-account metrics.
 
-    Confirmed formulas:
-      NET DP/WD = Deposit - Withdrawal
-      NET PNL USD = Closing Equity - Opening Equity - NET DP/WD
-                   = CE - OE - (Deposit - Withdrawal)
-    Closed Lots = (VolumeInOut / 2)
+    NET DP/WD   = Deposit – Withdrawal
+    NET PNL USD = Closing Equity – Opening Equity – NET DP/WD
+    Closed Lots = VolumeInOut / 2
+    NET PNL %   = NET PNL USD / |Opening Equity| * 100
     """
-    # Base from closing & opening equity and summary (all accounts)
     base = closing_df.rename(
         columns={"Equity": "Closing Equity", "Currency": "Currency"}
     ).copy()
 
     open_renamed = opening_df.rename(columns={"Equity": "Opening Equity"})
-    base = base.merge(
-        open_renamed[["Login", "Opening Equity"]],
-        on="Login",
-        how="left",
-    )
-
+    base = base.merge(open_renamed[["Login", "Opening Equity"]], on="Login", how="left")
     base = base.merge(summary_df, on="Login", how="left")
 
-    # Now restrict to accounts that appear in any of A/B/Hybrid lists
+    # Keep only accounts present in A / B / Hybrid lists
     report = accounts_df.merge(base, on="Login", how="left")
 
-    # Ensure numeric
     for col in [
         "Closing Equity",
         "Opening Equity",
@@ -225,28 +218,18 @@ def build_report(summary_df, closing_df, opening_df, accounts_df, eod_label: str
         else:
             report[col] = 0.0
 
-    # Closed lots: in+out volume / 2
     report["Closed Lots"] = report["VolumeInOut"] / 2.0
-
-    # NET DP/WD (cash flow)
     report["NET DP/WD"] = report["Deposit"] - report["Withdrawal"]
-
-    # NET PNL USD
     report["NET PNL USD"] = (
         report["Closing Equity"] - report["Opening Equity"] - report["NET DP/WD"]
     )
-
-    # NET PNL % (vs opening equity absolute)
     report["NET PNL %"] = np.where(
         report["Opening Equity"].abs() > 0,
-        (report["NET PNL USD"] / report["Opening Equity"].abs()) * 100.0,
+        report["NET PNL USD"] / report["Opening Equity"].abs() * 100.0,
         0.0,
     )
-
-    # Label with EOD date text
     report["EOD Closing Equity Date"] = eod_label
 
-    # Final ordered columns
     final_cols = [
         "Login",
         "Group",
@@ -269,9 +252,6 @@ def build_report(summary_df, closing_df, opening_df, accounts_df, eod_label: str
 
 
 def build_group_summary(account_df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Aggregate metrics per group and type.
-    """
     grouped = (
         account_df.groupby(["Group", "Type"], dropna=False)
         .agg(
@@ -287,9 +267,6 @@ def build_group_summary(account_df: pd.DataFrame) -> pd.DataFrame:
 
 
 def build_book_summary(account_df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Aggregate metrics for A-Book vs B-Book vs Hybrid vs Unknown.
-    """
     book = (
         account_df.groupby("Type")
         .agg(
@@ -303,77 +280,76 @@ def build_book_summary(account_df: pd.DataFrame) -> pd.DataFrame:
 
 
 # ---------------------------------------------------------
-# FILE UPLOAD UI + EOD LABEL
+# 1. INPUT SECTION
 # ---------------------------------------------------------
-st.markdown("### 1️⃣ Upload MT5 files")
+st.markdown("### 1️⃣ Upload MT5 files + account mappings")
 
 eod_label = st.text_input(
-    "EOD Closing Equity Date (this text will also be stored in the Excel report)",
+    "EOD Closing Equity Date (will be stored in report)",
     placeholder="e.g. 2025-12-02 EOD",
 )
 
-upload_container = st.container()
-with upload_container:
-    c1, c2 = st.columns(2)
-    c3, c4 = st.columns(2)
-    c5, c6, c7 = st.columns(3)
+c1, c2 = st.columns(2)
+c3, = st.columns(1)
+c4, c5, c6 = st.columns(3)
 
-    with c1:
-        summary_file = st.file_uploader(
-            "Sheet 1 – Summary / Transactions",
-            type=["xlsx", "xls", "csv"],
-            key="summary",
-            help="Includes Deposit, Withdrawal, Volume (J column for in+out), Commission, Swap.",
-        )
-    with c2:
-        closing_file = st.file_uploader(
-            "Sheet 2 – Closing Equity (EOD for report period)",
-            type=["xlsx", "xls"],
-            key="closing",
-            help="Daily report equity snapshot (EOD) for your closing date.",
-        )
-    with c3:
-        opening_file = st.file_uploader(
-            "Sheet 3 – Opening Equity (previous EOD)",
-            type=["xlsx", "xls"],
-            key="opening",
-            help="Previous EOD equity snapshot (used as opening equity).",
-        )
+with c1:
+    summary_file = st.file_uploader(
+        "Sheet 1 – Summary / Transactions",
+        type=["xlsx", "xls", "csv"],
+        help="Includes Deposit, Withdrawal, Volume (J column for in+out), Commission, Swap.",
+        key="summary",
+    )
 
-    with c5:
-        a_book_file = st.file_uploader(
-            "A-Book accounts (Login & optional Group)",
-            type=["xlsx", "xls", "csv"],
-            key="abook",
-            help="Only accounts listed here will be included as A-Book.",
-        )
-    with c6:
-        b_book_file = st.file_uploader(
-            "B-Book accounts (Login & optional Group)",
-            type=["xlsx", "xls", "csv"],
-            key="bbook",
-            help="Only accounts listed here will be included as B-Book.",
-        )
-    with c7:
-        hybrid_file = st.file_uploader(
-            "Hybrid accounts (Login & optional Group)",
-            type=["xlsx", "xls", "csv"],
-            key="hybrid",
-            help="Optional list of Hybrid-book accounts.",
-        )
+with c2:
+    closing_file = st.file_uploader(
+        "Sheet 2 – Closing Equity (EOD for report period)",
+        type=["xlsx", "xls"],
+        help="Daily report equity snapshot for closing date.",
+        key="closing",
+    )
+
+with c3:
+    opening_file = st.file_uploader(
+        "Sheet 3 – Opening Equity (previous EOD)",
+        type=["xlsx", "xls"],
+        help="Previous EOD equity snapshot (used as opening equity).",
+        key="opening",
+    )
+
+with c4:
+    a_book_file = st.file_uploader(
+        "A-Book accounts (Login & optional Group)",
+        type=["xlsx", "xls", "csv"],
+        key="abook",
+    )
+
+with c5:
+    b_book_file = st.file_uploader(
+        "B-Book accounts (Login & optional Group)",
+        type=["xlsx", "xls", "csv"],
+        key="bbook",
+    )
+
+with c6:
+    hybrid_file = st.file_uploader(
+        "Hybrid accounts (Login & optional Group)",
+        type=["xlsx", "xls", "csv"],
+        key="hybrid",
+    )
 
 st.markdown("---")
 
 # ---------------------------------------------------------
-# MAIN ACTION
+# 2. GENERATE REPORT
 # ---------------------------------------------------------
 if st.button("🚀 Generate report"):
     if not (summary_file and closing_file and opening_file):
-        st.error("Please upload Summary + Closing Equity + Opening Equity files.")
+        st.error("Please upload Summary, Closing Equity and Opening Equity files.")
     elif not (a_book_file or b_book_file or hybrid_file):
-        st.error("Please upload at least one of: A-Book, B-Book or Hybrid accounts file.")
+        st.error("Upload at least one of: A-Book, B-Book or Hybrid accounts.")
     elif not eod_label:
-        st.error("Please enter the EOD Closing Equity Date text (for report labelling).")
+        st.error("Please enter the EOD Closing Equity Date text.")
     else:
         try:
             with st.spinner("Reading files and calculating P&L…"):
@@ -381,61 +357,72 @@ if st.button("🚀 Generate report"):
                 closing_df = load_equity_sheet(closing_file)
                 opening_df = load_equity_sheet(opening_file)
 
-                # Build accounts mapping from up to three lists
-                accounts_frames = []
+                account_frames = []
                 if a_book_file:
-                    accounts_frames.append(load_book_accounts(a_book_file, "A-Book"))
+                    account_frames.append(load_book_accounts(a_book_file, "A-Book"))
                 if b_book_file:
-                    accounts_frames.append(load_book_accounts(b_book_file, "B-Book"))
+                    account_frames.append(load_book_accounts(b_book_file, "B-Book"))
                 if hybrid_file:
-                    accounts_frames.append(load_book_accounts(hybrid_file, "Hybrid"))
+                    account_frames.append(load_book_accounts(hybrid_file, "Hybrid"))
 
-                accounts_df = pd.concat(accounts_frames, ignore_index=True)
-                # If an account appears multiple times across books keep the first mapping
+                accounts_df = pd.concat(account_frames, ignore_index=True)
                 accounts_df = accounts_df.drop_duplicates(subset=["Login"], keep="first")
 
                 account_df = build_report(
-                    summary_df=summary_df,
-                    closing_df=closing_df,
-                    opening_df=opening_df,
-                    accounts_df=accounts_df,
-                    eod_label=eod_label,
+                    summary_df, closing_df, opening_df, accounts_df, eod_label
                 )
-
                 group_df = build_group_summary(account_df)
                 book_df = build_book_summary(account_df)
 
-            # ---------------- KPIs ----------------
+            # -------------- HIGH LEVEL KPIs --------------
             st.markdown("### 2️⃣ Overview")
 
-            kcol1, kcol2, kcol3, kcol4 = st.columns(4)
+            k1, k2, k3, k4 = st.columns(4)
             total_clients = account_df["Login"].nunique()
             total_closed_lots = account_df["Closed Lots"].sum()
             net_pnl = account_df["NET PNL USD"].sum()
             total_profit = account_df.loc[account_df["NET PNL USD"] > 0, "NET PNL USD"].sum()
             total_loss = account_df.loc[account_df["NET PNL USD"] < 0, "NET PNL USD"].sum()
 
-            with kcol1:
+            with k1:
                 st.markdown('<div class="metric-card">', unsafe_allow_html=True)
                 st.markdown('<div class="metric-label">Clients</div>', unsafe_allow_html=True)
-                st.markdown(f'<div class="metric-value">{int(total_clients)}</div>', unsafe_allow_html=True)
+                st.markdown(
+                    f'<div class="metric-value">{int(total_clients)}</div>',
+                    unsafe_allow_html=True,
+                )
                 st.markdown("</div>", unsafe_allow_html=True)
 
-            with kcol2:
+            with k2:
                 st.markdown('<div class="metric-card">', unsafe_allow_html=True)
-                st.markdown('<div class="metric-label">Closed lots</div>', unsafe_allow_html=True)
-                st.markdown(f'<div class="metric-value">{total_closed_lots:,.2f}</div>', unsafe_allow_html=True)
+                st.markdown(
+                    '<div class="metric-label">Closed lots</div>',
+                    unsafe_allow_html=True,
+                )
+                st.markdown(
+                    f'<div class="metric-value">{total_closed_lots:,.2f}</div>',
+                    unsafe_allow_html=True,
+                )
                 st.markdown("</div>", unsafe_allow_html=True)
 
-            with kcol3:
+            with k3:
                 st.markdown('<div class="metric-card">', unsafe_allow_html=True)
-                st.markdown('<div class="metric-label">Net client P&L</div>', unsafe_allow_html=True)
-                st.markdown(f'<div class="metric-value">{net_pnl:,.2f}</div>', unsafe_allow_html=True)
+                st.markdown(
+                    '<div class="metric-label">Net client P&L</div>',
+                    unsafe_allow_html=True,
+                )
+                st.markdown(
+                    f'<div class="metric-value">{net_pnl:,.2f}</div>',
+                    unsafe_allow_html=True,
+                )
                 st.markdown("</div>", unsafe_allow_html=True)
 
-            with kcol4:
+            with k4:
                 st.markdown('<div class="metric-card">', unsafe_allow_html=True)
-                st.markdown('<div class="metric-label">Profit vs loss</div>', unsafe_allow_html=True)
+                st.markdown(
+                    '<div class="metric-label">Profit vs loss</div>',
+                    unsafe_allow_html=True,
+                )
                 profit_abs = float(total_profit)
                 loss_abs = float(abs(total_loss))
                 denom = profit_abs + loss_abs
@@ -450,17 +437,14 @@ if st.button("🚀 Generate report"):
                 )
                 st.markdown("</div>", unsafe_allow_html=True)
 
-            # Simple bar chart Profit vs Loss
+            # Profit vs loss bar chart
             chart_data = pd.DataFrame(
-                {
-                    "Side": ["Profit", "Loss"],
-                    "Amount": [profit_abs, loss_abs],
-                }
+                {"Side": ["Profit", "Loss"], "Amount": [profit_abs, loss_abs]}
             ).set_index("Side")
             st.markdown("### 3️⃣ Profit vs loss chart")
             st.bar_chart(chart_data)
 
-            # ---------------- Book summary (A / B / Hybrid) ----------------
+            # -------------- BOOK SUMMARY --------------
             st.markdown("### 4️⃣ A-Book / B-Book / Hybrid summary")
             st.dataframe(book_df, use_container_width=True)
 
@@ -468,21 +452,21 @@ if st.button("🚀 Generate report"):
             pnl_b = book_df.loc[book_df["Type"] == "B-Book", "NET_PNL_USD"].sum()
             pnl_h = book_df.loc[book_df["Type"] == "Hybrid", "NET_PNL_USD"].sum()
 
-            total_client_pnl = pnl_a + pnl_b + pnl_h
-            result_label = "profit" if total_client_pnl >= 0 else "loss"
+            client_pnl_total = pnl_a + pnl_b + pnl_h
+            client_result = "profit" if client_pnl_total >= 0 else "loss"
             st.markdown(
-                f"**Client P&L from A-Book, B-Book and Hybrid (A + B + Hybrid): "
-                f"{total_client_pnl:,.2f} ({result_label})**"
+                f"**Client P&L from A-Book + B-Book + Hybrid:** "
+                f"{client_pnl_total:,.2f} ({client_result})"
             )
 
-            # ---------------- Top gainers / losers (accounts) ----------------
+            # -------------- TOP ACCOUNTS --------------
             st.markdown("### 5️⃣ Top 10 accounts")
 
-            col_g, col_l = st.columns(2)
+            gcol, lcol = st.columns(2)
             top_gainers = account_df.sort_values("NET PNL USD", ascending=False).head(10)
             top_losers = account_df.sort_values("NET PNL USD", ascending=True).head(10)
 
-            gain_cols = [
+            acc_cols = [
                 "Login",
                 "Group",
                 "Type",
@@ -494,31 +478,33 @@ if st.button("🚀 Generate report"):
                 "NET DP/WD",
             ]
 
-            with col_g:
+            with gcol:
                 st.markdown("**Top 10 gainers (accounts)**")
-                st.dataframe(top_gainers[gain_cols], use_container_width=True)
+                st.dataframe(top_gainers[acc_cols], use_container_width=True)
 
-            with col_l:
+            with lcol:
                 st.markdown("**Top 10 losers (accounts)**")
-                st.dataframe(top_losers[gain_cols], use_container_width=True)
+                st.dataframe(top_losers[acc_cols], use_container_width=True)
 
-            # ---------------- Group-wise summary & top groups ----------------
+            # -------------- GROUP SUMMARY --------------
             st.markdown("### 6️⃣ Group-wise summary")
-
             st.dataframe(group_df, use_container_width=True)
 
-            gcol1, gcol2 = st.columns(2)
-            with gcol1:
+            g1, g2 = st.columns(2)
+            with g1:
                 st.markdown("**Top 5 profit groups**")
-                top_groups_profit = group_df.sort_values("NET_PNL_USD", ascending=False).head(5)
-                st.dataframe(top_groups_profit, use_container_width=True)
-
-            with gcol2:
+                st.dataframe(
+                    group_df.sort_values("NET_PNL_USD", ascending=False).head(5),
+                    use_container_width=True,
+                )
+            with g2:
                 st.markdown("**Top 5 loss groups**")
-                top_groups_loss = group_df.sort_values("NET_PNL_USD", ascending=True).head(5)
-                st.dataframe(top_groups_loss, use_container_width=True)
+                st.dataframe(
+                    group_df.sort_values("NET_PNL_USD", ascending=True).head(5),
+                    use_container_width=True,
+                )
 
-            # ---------------- Download Excel ----------------
+            # -------------- EXPORT EXCEL --------------
             st.markdown("### 7️⃣ Download report")
 
             output = BytesIO()
@@ -532,11 +518,11 @@ if st.button("🚀 Generate report"):
                 label="⬇️ Download Excel report",
                 data=output,
                 file_name=f"Client_PnL_Report_{eod_label.replace(' ', '_')}.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                mime=(
+                    "application/vnd.openxmlformats-officedocument."
+                    "spreadsheetml.sheet"
+                ),
             )
 
-        except Exception as e:
-            st.error(f"❌ Error while generating report: {e}")
-'''
-print("syntax ok")
-
+        except Exception as exc:  # safety so the app doesn't crash
+            st.error(f"❌ Error while generating report: {exc}")
