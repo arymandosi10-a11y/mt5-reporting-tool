@@ -1,3 +1,4 @@
+code = r'''
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -7,7 +8,7 @@ from io import BytesIO
 # BASIC PAGE SETUP
 # ---------------------------------------------------------
 st.set_page_config(
-    page_title="MT5 Reporting Tool",
+    page_title="Client P&L Monitoring Tool",
     layout="wide",
     initial_sidebar_state="expanded"
 )
@@ -51,7 +52,7 @@ body, .main {
 </style>
 """, unsafe_allow_html=True)
 
-st.title("📊 FX Client P&L Monitoring")
+st.title("📊 Client P&L Monitoring")
 
 st.caption(
     "Upload your daily MT5 exports to generate account-wise and group-wise P&L with A-Book vs B-Book comparison."
@@ -89,7 +90,7 @@ def load_summary_sheet(file) -> pd.DataFrame:
     df["Login"] = pd.to_numeric(raw.iloc[:, 0], errors="coerce").astype("Int64")
     df["Deposit"] = pd.to_numeric(raw.iloc[:, 2], errors="coerce").fillna(0.0)
     df["Withdrawal"] = pd.to_numeric(raw.iloc[:, 5], errors="coerce").fillna(0.0)
-    # Full volume (optional)
+    # Full volume (optional, not strictly needed now)
     df["VolumeFull"] = pd.to_numeric(raw.iloc[:, 8], errors="coerce").fillna(0.0)
     # Volume in+out (column J) used for Closed Lots
     df["VolumeInOut"] = pd.to_numeric(raw.iloc[:, 9], errors="coerce").fillna(0.0)
@@ -241,7 +242,7 @@ def build_report(summary_df, closing_df, opening_df, accounts_df, eod_label: str
     # NET DP/WD (cash flow)
     report["NET DP/WD"] = report["Deposit"] - report["Withdrawal"]
 
-    # NET PNL USD = CE - OE - (Deposit - Withdrawal)
+    # NET PNL USD
     report["NET PNL USD"] = (
         report["Closing Equity"] - report["Opening Equity"] - report["NET DP/WD"]
     )
@@ -249,7 +250,7 @@ def build_report(summary_df, closing_df, opening_df, accounts_df, eod_label: str
     # A/B book classification
     report["Type"] = report["Group"].apply(classify_book_type)
 
-    # Label with EOD date text (for reference in Excel)
+    # Label with EOD date text
     report["EOD Closing Equity Date"] = eod_label
 
     # Final ordered columns
@@ -313,7 +314,7 @@ def build_book_summary(account_df: pd.DataFrame) -> pd.DataFrame:
 st.markdown("### 1️⃣ Upload MT5 files")
 
 eod_label = st.text_input(
-    "EOD Closing Equity Date (this text will be stored in the Excel report header)",
+    "EOD Closing Equity Date (this text will also be stored in the Excel report)",
     placeholder="e.g. 2025-12-02 EOD",
 )
 
@@ -439,6 +440,14 @@ if st.button("🚀 Generate report"):
             st.markdown("### 4️⃣ A-Book vs B-Book summary")
             st.dataframe(book_df, use_container_width=True)
 
+            # Compute A-Book vs B-Book P&L difference
+            pnl_a = book_df.loc[book_df["Type"] == "A-Book", "NET_PNL_USD"].sum()
+            pnl_b = book_df.loc[book_df["Type"] == "B-Book", "NET_PNL_USD"].sum()
+            diff_ab = pnl_a - pnl_b
+            st.markdown(
+                f"**A-Book vs B-Book P&L difference:** A-Book − B-Book = **{diff_ab:,.2f}**"
+            )
+
             # ---------------- Top gainers / losers (accounts) ----------------
             st.markdown("### 5️⃣ Top 10 accounts")
 
@@ -446,19 +455,24 @@ if st.button("🚀 Generate report"):
             top_gainers = account_df.sort_values("NET PNL USD", ascending=False).head(10)
             top_losers = account_df.sort_values("NET PNL USD", ascending=True).head(10)
 
+            gain_cols = [
+                "Login",
+                "Group",
+                "Type",
+                "Opening Equity",
+                "Closing Equity",
+                "NET PNL USD",
+                "Closed Lots",
+                "NET DP/WD",
+            ]
+
             with col_g:
                 st.markdown("**Top 10 gainers (accounts)**")
-                st.dataframe(
-                    top_gainers[["Login", "Group", "Type", "NET PNL USD", "Closed Lots", "NET DP/WD"]],
-                    use_container_width=True,
-                )
+                st.dataframe(top_gainers[gain_cols], use_container_width=True)
 
             with col_l:
                 st.markdown("**Top 10 losers (accounts)**")
-                st.dataframe(
-                    top_losers[["Login", "Group", "Type", "NET PNL USD", "Closed Lots", "NET DP/WD"]],
-                    use_container_width=True,
-                )
+                st.dataframe(top_losers[gain_cols], use_container_width=True)
 
             # ---------------- Group-wise summary & top groups ----------------
             st.markdown("### 6️⃣ Group-wise summary")
@@ -481,12 +495,7 @@ if st.button("🚀 Generate report"):
 
             output = BytesIO()
             with pd.ExcelWriter(output, engine="openpyxl") as writer:
-                # Simple "Info" sheet with EOD label
-                info_df = pd.DataFrame(
-                    {"Field": ["EOD Closing Equity Date"], "Value": [eod_label]}
-                )
-                info_df.to_excel(writer, index=False, sheet_name="Info")
-
+                # No blank / info sheet – just the three main tables
                 account_df.to_excel(writer, index=False, sheet_name="Accounts")
                 group_df.to_excel(writer, index=False, sheet_name="Groups")
                 book_df.to_excel(writer, index=False, sheet_name="Books")
@@ -495,9 +504,12 @@ if st.button("🚀 Generate report"):
             st.download_button(
                 label="⬇️ Download Excel report",
                 data=output,
-                file_name=f"FX_PnL_Report_{eod_label.replace(' ', '_')}.xlsx",
+                file_name=f"Client_PnL_Report_{eod_label.replace(' ', '_')}.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             )
 
         except Exception as e:
             st.error(f"❌ Error while generating report: {e}")
+'''
+print("syntax ok")
+
