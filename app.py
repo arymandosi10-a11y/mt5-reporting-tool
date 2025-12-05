@@ -1,7 +1,5 @@
-code = r'''
 import streamlit as st
 import pandas as pd
-import numpy as np
 from io import BytesIO
 
 # ---------------------------------------------------------
@@ -53,7 +51,6 @@ body, .main {
 """, unsafe_allow_html=True)
 
 st.title("📊 Client P&L Monitoring")
-
 st.caption(
     "Upload your daily MT5 exports to generate account-wise and group-wise P&L with A-Book vs B-Book comparison."
 )
@@ -64,15 +61,14 @@ st.caption(
 def load_summary_sheet(file) -> pd.DataFrame:
     """
     Sheet 1: Summary / Transactions
-    Columns (0-based index):
+    Expected columns (0-based):
         0: Login
         2: Deposit (C)
         5: Withdrawal (F)
-        8: Volume full lots (I)            [optional]
-        9: Volume in+out deals (J)         [used for Closed Lots]
+        8: Volume full lots (I)        [optional]
+        9: Volume in+out deals (J)     [used for Closed Lots]
         10: Commission (K)
         12: Swap (M)
-    We group by Login because there may be multiple rows per account.
     """
     name = file.name.lower()
     if name.endswith(".csv"):
@@ -90,9 +86,7 @@ def load_summary_sheet(file) -> pd.DataFrame:
     df["Login"] = pd.to_numeric(raw.iloc[:, 0], errors="coerce").astype("Int64")
     df["Deposit"] = pd.to_numeric(raw.iloc[:, 2], errors="coerce").fillna(0.0)
     df["Withdrawal"] = pd.to_numeric(raw.iloc[:, 5], errors="coerce").fillna(0.0)
-    # Full volume (optional, not strictly needed now)
     df["VolumeFull"] = pd.to_numeric(raw.iloc[:, 8], errors="coerce").fillna(0.0)
-    # Volume in+out (column J) used for Closed Lots
     df["VolumeInOut"] = pd.to_numeric(raw.iloc[:, 9], errors="coerce").fillna(0.0)
     df["Commission"] = pd.to_numeric(raw.iloc[:, 10], errors="coerce").fillna(0.0)
     df["Swap"] = pd.to_numeric(raw.iloc[:, 12], errors="coerce").fillna(0.0)
@@ -100,16 +94,15 @@ def load_summary_sheet(file) -> pd.DataFrame:
     grouped = (
         df.groupby("Login", as_index=False)[
             ["Deposit", "Withdrawal", "VolumeFull", "VolumeInOut", "Commission", "Swap"]
-        ]
-        .sum()
+        ].sum()
     )
     return grouped
 
 
 def load_equity_sheet(file) -> pd.DataFrame:
     """
-    Sheet 2 & 3: Daily Reports (EOD equity snapshots)
-    Expect columns: Login, Equity, Currency.
+    Sheet 2 & 3: Daily report (EOD equity snapshot).
+    We look for columns: Login, Equity, Currency.
     """
     try:
         df = pd.read_excel(file, header=2)
@@ -127,7 +120,7 @@ def load_equity_sheet(file) -> pd.DataFrame:
         raise ValueError(f"Could not find column for {name_options}")
 
     login_col = find_col(["login"], 0)
-    equity_col = find_col(["equity"], 9)  # column J ~ index 9
+    equity_col = find_col(["equity"], 9)  # J ~ index 9
     currency_col = None
     for opt in ["currency", "curr", "ccy"]:
         if opt in cols_lower:
@@ -146,10 +139,7 @@ def load_equity_sheet(file) -> pd.DataFrame:
 
 def load_accounts(file) -> pd.DataFrame:
     """
-    Accounts mapping:
-      - Login
-      - Group
-    Supports CSV or Excel.
+    Accounts mapping: Login, Group (csv or xlsx).
     """
     name = file.name.lower()
     if name.endswith(".csv"):
@@ -157,12 +147,11 @@ def load_accounts(file) -> pd.DataFrame:
     else:
         df = pd.read_excel(file)
 
-    # Normalise login / group column names
-    lower_cols = {c.lower(): c for c in df.columns}
-    if "login" in lower_cols and "Login" not in df.columns:
-        df = df.rename(columns={lower_cols["login"]: "Login"})
-    if "group" in lower_cols and "Group" not in df.columns:
-        df = df.rename(columns={lower_cols["group"]: "Group"})
+    lower = {c.lower(): c for c in df.columns}
+    if "login" in lower and "Login" not in df.columns:
+        df = df.rename(columns={lower["login"]: "Login"})
+    if "group" in lower and "Group" not in df.columns:
+        df = df.rename(columns={lower["group"]: "Group"})
 
     if "Login" not in df.columns:
         raise ValueError("Accounts file must contain a 'Login' column.")
@@ -176,10 +165,10 @@ def load_accounts(file) -> pd.DataFrame:
 
 def classify_book_type(group: str) -> str:
     """
-    A/B-book detection based on group text:
-      - contains '_A'  -> A-Book
-      - contains '_B'  -> B-Book
-      - else           -> Unknown
+    A/B-book detection from Group:
+      '_A' -> A-Book
+      '_B' -> B-Book
+      else -> Unknown
     """
     if not isinstance(group, str):
         return "Unknown"
@@ -193,20 +182,15 @@ def classify_book_type(group: str) -> str:
 
 def build_report(summary_df, closing_df, opening_df, accounts_df, eod_label: str):
     """
-    Combine all sheets & compute per-account metrics.
-
-    Confirmed formulas:
-      NET DP/WD = Deposit - Withdrawal
+    Join all data & compute:
+      Closed Lots = VolumeInOut / 2
+      NET DP/WD   = Deposit - Withdrawal
       NET PNL USD = Closing Equity - Opening Equity - NET DP/WD
-                   = CE - OE - (Deposit - Withdrawal)
-    Closed Lots = (VolumeInOut / 2)
     """
-    # Base from closing equity
     report = closing_df.rename(
         columns={"Equity": "Closing Equity", "Currency": "Currency"}
     ).copy()
 
-    # Merge opening equity
     open_renamed = opening_df.rename(columns={"Equity": "Opening Equity"})
     report = report.merge(
         open_renamed[["Login", "Opening Equity"]],
@@ -214,46 +198,30 @@ def build_report(summary_df, closing_df, opening_df, accounts_df, eod_label: str
         how="left",
     )
 
-    # Merge summary (cash & volume)
     report = report.merge(summary_df, on="Login", how="left")
-
-    # Merge accounts (group)
     report = report.merge(accounts_df, on="Login", how="left")
 
-    # Ensure numeric
     for col in [
-        "Closing Equity",
-        "Opening Equity",
-        "Deposit",
-        "Withdrawal",
-        "VolumeFull",
-        "VolumeInOut",
-        "Commission",
-        "Swap",
+        "Closing Equity", "Opening Equity",
+        "Deposit", "Withdrawal",
+        "VolumeFull", "VolumeInOut",
+        "Commission", "Swap",
     ]:
         if col in report.columns:
             report[col] = pd.to_numeric(report[col], errors="coerce").fillna(0.0)
         else:
             report[col] = 0.0
 
-    # Closed lots: in+out volume / 2
     report["Closed Lots"] = report["VolumeInOut"] / 2.0
-
-    # NET DP/WD (cash flow)
     report["NET DP/WD"] = report["Deposit"] - report["Withdrawal"]
 
-    # NET PNL USD
     report["NET PNL USD"] = (
         report["Closing Equity"] - report["Opening Equity"] - report["NET DP/WD"]
     )
 
-    # A/B book classification
     report["Type"] = report["Group"].apply(classify_book_type)
-
-    # Label with EOD date text
     report["EOD Closing Equity Date"] = eod_label
 
-    # Final ordered columns
     final_cols = [
         "Login",
         "Group",
@@ -270,15 +238,11 @@ def build_report(summary_df, closing_df, opening_df, accounts_df, eod_label: str
         "Closing Equity",
         "EOD Closing Equity Date",
     ]
-    final = report[final_cols].copy().sort_values("Login").reset_index(drop=True)
-    return final
+    return report[final_cols].sort_values("Login").reset_index(drop=True)
 
 
 def build_group_summary(account_df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Aggregate metrics per group and type.
-    """
-    grouped = (
+    return (
         account_df.groupby(["Group", "Type"], dropna=False)
         .agg(
             Closed_Lots=("Closed Lots", "sum"),
@@ -289,14 +253,10 @@ def build_group_summary(account_df: pd.DataFrame) -> pd.DataFrame:
         )
         .reset_index()
     )
-    return grouped
 
 
 def build_book_summary(account_df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Aggregate metrics for A-Book vs B-Book vs Unknown.
-    """
-    book = (
+    return (
         account_df.groupby("Type")
         .agg(
             Accounts=("Login", "nunique"),
@@ -305,8 +265,6 @@ def build_book_summary(account_df: pd.DataFrame) -> pd.DataFrame:
         )
         .reset_index()
     )
-    return book
-
 
 # ---------------------------------------------------------
 # FILE UPLOAD UI + EOD LABEL
@@ -318,39 +276,37 @@ eod_label = st.text_input(
     placeholder="e.g. 2025-12-02 EOD",
 )
 
-upload_container = st.container()
-with upload_container:
-    c1, c2 = st.columns(2)
-    c3, c4 = st.columns(2)
+c1, c2 = st.columns(2)
+c3, c4 = st.columns(2)
 
-    with c1:
-        summary_file = st.file_uploader(
-            "Sheet 1 – Summary / Transactions",
-            type=["xlsx", "xls", "csv"],
-            key="summary",
-            help="Includes Deposit, Withdrawal, Volume (J column for in+out), Commission, Swap.",
-        )
-    with c2:
-        closing_file = st.file_uploader(
-            "Sheet 2 – Closing Equity (EOD for report period)",
-            type=["xlsx", "xls"],
-            key="closing",
-            help="Daily report equity snapshot (EOD) for your closing date.",
-        )
-    with c3:
-        opening_file = st.file_uploader(
-            "Sheet 3 – Opening Equity (previous EOD)",
-            type=["xlsx", "xls"],
-            key="opening",
-            help="Previous EOD equity snapshot (used as opening equity).",
-        )
-    with c4:
-        accounts_file = st.file_uploader(
-            "Accounts mapping (Login → Group)",
-            type=["xlsx", "xls", "csv"],
-            key="accounts",
-            help="Use Accounts.csv or Excel with Login & Group columns.",
-        )
+with c1:
+    summary_file = st.file_uploader(
+        "Sheet 1 – Summary / Transactions",
+        type=["xlsx", "xls", "csv"],
+        key="summary",
+        help="Includes Deposit, Withdrawal, Volume (J column for in+out), Commission, Swap.",
+    )
+with c2:
+    closing_file = st.file_uploader(
+        "Sheet 2 – Closing Equity (EOD for report period)",
+        type=["xlsx", "xls"],
+        key="closing",
+        help="Daily report equity snapshot (EOD) for your closing date.",
+    )
+with c3:
+    opening_file = st.file_uploader(
+        "Sheet 3 – Opening Equity (previous EOD)",
+        type=["xlsx", "xls"],
+        key="opening",
+        help="Previous EOD equity snapshot (used as opening equity).",
+    )
+with c4:
+    accounts_file = st.file_uploader(
+        "Accounts mapping (Login → Group)",
+        type=["xlsx", "xls", "csv"],
+        key="accounts",
+        help="Use Accounts.csv or Excel with Login & Group columns.",
+    )
 
 st.markdown("---")
 
@@ -426,13 +382,12 @@ if st.button("🚀 Generate report"):
                 )
                 st.markdown("</div>", unsafe_allow_html=True)
 
-            # Simple bar chart Profit vs Loss
-            chart_data = pd.DataFrame(
-                {
-                    "Side": ["Profit", "Loss"],
-                    "Amount": [profit_abs, loss_abs],
-                }
-            ).set_index("Side")
+            # Profit vs Loss chart
+            chart_data = (
+                pd.DataFrame(
+                    {"Side": ["Profit", "Loss"], "Amount": [profit_abs, loss_abs]}
+                ).set_index("Side")
+            )
             st.markdown("### 3️⃣ Profit vs loss chart")
             st.bar_chart(chart_data)
 
@@ -440,7 +395,6 @@ if st.button("🚀 Generate report"):
             st.markdown("### 4️⃣ A-Book vs B-Book summary")
             st.dataframe(book_df, use_container_width=True)
 
-            # Compute A-Book vs B-Book P&L difference
             pnl_a = book_df.loc[book_df["Type"] == "A-Book", "NET_PNL_USD"].sum()
             pnl_b = book_df.loc[book_df["Type"] == "B-Book", "NET_PNL_USD"].sum()
             diff_ab = pnl_a - pnl_b
@@ -476,26 +430,27 @@ if st.button("🚀 Generate report"):
 
             # ---------------- Group-wise summary & top groups ----------------
             st.markdown("### 6️⃣ Group-wise summary")
-
             st.dataframe(group_df, use_container_width=True)
 
             gcol1, gcol2 = st.columns(2)
             with gcol1:
                 st.markdown("**Top 5 profit groups**")
-                top_groups_profit = group_df.sort_values("NET_PNL_USD", ascending=False).head(5)
-                st.dataframe(top_groups_profit, use_container_width=True)
-
+                st.dataframe(
+                    group_df.sort_values("NET_PNL_USD", ascending=False).head(5),
+                    use_container_width=True,
+                )
             with gcol2:
                 st.markdown("**Top 5 loss groups**")
-                top_groups_loss = group_df.sort_values("NET_PNL_USD", ascending=True).head(5)
-                st.dataframe(top_groups_loss, use_container_width=True)
+                st.dataframe(
+                    group_df.sort_values("NET_PNL_USD", ascending=True).head(5),
+                    use_container_width=True,
+                )
 
             # ---------------- Download Excel ----------------
             st.markdown("### 7️⃣ Download report")
 
             output = BytesIO()
             with pd.ExcelWriter(output, engine="openpyxl") as writer:
-                # No blank / info sheet – just the three main tables
                 account_df.to_excel(writer, index=False, sheet_name="Accounts")
                 group_df.to_excel(writer, index=False, sheet_name="Groups")
                 book_df.to_excel(writer, index=False, sheet_name="Books")
@@ -510,6 +465,3 @@ if st.button("🚀 Generate report"):
 
         except Exception as e:
             st.error(f"❌ Error while generating report: {e}")
-'''
-print("syntax ok")
-
