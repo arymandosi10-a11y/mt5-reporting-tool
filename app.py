@@ -4,7 +4,7 @@ import numpy as np
 from io import BytesIO
 
 # ============================================================
-# PAGE CONFIG & GLOBAL STYLING
+# PAGE CONFIG & STYLING
 # ============================================================
 
 st.set_page_config(
@@ -55,7 +55,7 @@ st.markdown(
     .hero-subtitle {
         font-size: 0.97rem;
         color: #d1d5db;
-        max-width: 640px;
+        max-width: 650px;
     }
     .metric-card {
         background: #ffffff;
@@ -111,13 +111,11 @@ st.markdown(
 st.markdown(
     """
     <div class="hero-card">
-        <div class="hero-badge">
-            <span>FX client book monitor</span>
-        </div>
+        <div class="hero-badge"><span>FX client book monitor</span></div>
         <div class="hero-title">Client P&L Monitoring Tool</div>
         <div class="hero-subtitle">
-            Upload MT5 reports to see account-wise, group-wise and book-wise P&L
-            – including A-Book vs B-Book vs Hybrid and A-Book vs LP brokerage.
+            Upload MT5 reports to see account-wise and book-wise P&L
+            – including A-Book vs B-Book vs Hybrid, and Top Gainers/Losers.
         </div>
     </div>
     """,
@@ -129,40 +127,49 @@ st.markdown(
 # ============================================================
 
 def _read_excel_guess(file, header=2) -> pd.DataFrame:
+    """
+    MT5 reports often have 2 header lines -> try header=2, else fallback.
+    """
     try:
         return pd.read_excel(file, header=header)
     except Exception:
         file.seek(0)
         return pd.read_excel(file)
 
-def _parse_exclude_text(text: str) -> set:
+def _normalize_col(c: str) -> str:
+    return str(c).strip().lower().replace("\n", " ").replace("_", " ")
+
+def _find_col_by_keywords(df: pd.DataFrame, keywords: list[str], required=True):
+    cols = list(df.columns)
+    norm = [_normalize_col(c) for c in cols]
+    for kw in keywords:
+        kw = kw.lower()
+        for i, c in enumerate(norm):
+            if kw in c:
+                return cols[i]
+    if required:
+        raise ValueError(f"Missing required column. Tried keywords: {keywords}")
+    return None
+
+def _parse_exclude_text(text: str) -> set[int]:
     if not text:
         return set()
     raw = text.replace(",", "\n").replace(";", "\n").replace("\t", "\n")
     parts = [p.strip() for p in raw.split("\n") if p.strip()]
-    logins = set()
+    out = set()
     for p in parts:
         try:
-            logins.add(int(float(p)))
+            out.add(int(float(p)))
         except Exception:
             pass
-    return logins
+    return out
 
-def _read_exclude_file(file) -> set:
+def _read_exclude_file(file) -> set[int]:
     if file is None:
         return set()
     name = file.name.lower()
     df = pd.read_csv(file) if name.endswith(".csv") else pd.read_excel(file)
-
-    cols = [str(c).strip().lower() for c in df.columns]
-    login_col = None
-    for opt in ["login", "account", "accountid"]:
-        if opt in cols:
-            login_col = df.columns[cols.index(opt)]
-            break
-    if login_col is None:
-        login_col = df.columns[0]
-
+    login_col = _find_col_by_keywords(df, ["login", "account"], required=False) or df.columns[0]
     ser = pd.to_numeric(df[login_col], errors="coerce").dropna()
     return set(ser.astype(int).tolist())
 
@@ -170,19 +177,12 @@ def _read_accounts_file(file) -> pd.DataFrame:
     name = file.name.lower()
     df = pd.read_csv(file) if name.endswith(".csv") else pd.read_excel(file)
 
-    lower_cols = {str(c).lower(): c for c in df.columns}
-    if "login" in lower_cols and "Login" not in df.columns:
-        df = df.rename(columns={lower_cols["login"]: "Login"})
-    if "group" in lower_cols and "Group" not in df.columns:
-        df = df.rename(columns={lower_cols["group"]: "Group"})
+    login_col = _find_col_by_keywords(df, ["login", "account"], required=False) or df.columns[0]
+    group_col = _find_col_by_keywords(df, ["group"], required=False)
 
-    if "Login" not in df.columns:
-        df = df.rename(columns={df.columns[0]: "Login"})
-    if "Group" not in df.columns:
-        df["Group"] = ""
-
-    out = df[["Login", "Group"]].copy()
-    out["Login"] = pd.to_numeric(out["Login"], errors="coerce").astype("Int64")
+    out = pd.DataFrame()
+    out["Login"] = pd.to_numeric(df[login_col], errors="coerce").astype("Int64")
+    out["Group"] = df[group_col].astype(str) if group_col else ""
     return out
 
 def load_book_accounts(file, book_type: str) -> pd.DataFrame:
@@ -194,21 +194,21 @@ def load_book_accounts(file, book_type: str) -> pd.DataFrame:
 def load_switch_file(file) -> pd.DataFrame:
     name = file.name.lower()
     df = pd.read_csv(file) if name.endswith(".csv") else pd.read_excel(file)
-    lower = {str(c).lower(): c for c in df.columns}
 
-    def pick(col):
-        if col.lower() not in lower:
-            raise ValueError(f"Switch file must contain column '{col}'")
-        return lower[col.lower()]
+    login_col = _find_col_by_keywords(df, ["login", "account"])
+    from_col = _find_col_by_keywords(df, ["fromtype", "from type", "from"])
+    to_col = _find_col_by_keywords(df, ["totype", "to type", "to"])
+    shift_col = _find_col_by_keywords(df, ["shiftequity", "shift equity", "shift"])
 
     out = pd.DataFrame()
-    out["Login"] = pd.to_numeric(df[pick("login")], errors="coerce").astype("Int64")
-    out["FromType"] = df[pick("fromtype")].astype(str)
-    out["ToType"] = df[pick("totype")].astype(str)
-    out["ShiftEquity"] = pd.to_numeric(df[pick("shiftequity")], errors="coerce").fillna(0.0)
+    out["Login"] = pd.to_numeric(df[login_col], errors="coerce").astype("Int64")
+    out["FromType"] = df[from_col].astype(str)
+    out["ToType"] = df[to_col].astype(str)
+    out["ShiftEquity"] = pd.to_numeric(df[shift_col], errors="coerce").fillna(0.0)
 
-    if "hybridratio" in lower:
-        hr = pd.to_numeric(df[pick("hybridratio")], errors="coerce")
+    hr_col = _find_col_by_keywords(df, ["hybridratio", "hybrid ratio"], required=False)
+    if hr_col is not None:
+        hr = pd.to_numeric(df[hr_col], errors="coerce")
         hr = hr.apply(lambda x: x / 100.0 if pd.notna(x) and x > 1 else x)
         out["HybridRatio"] = hr.fillna(np.nan)
     else:
@@ -216,40 +216,43 @@ def load_switch_file(file) -> pd.DataFrame:
 
     return out
 
-def load_equity_sheet(file, header_row=2, login_col=None, equity_col=None, currency_col=None) -> pd.DataFrame:
-    df = _read_excel_guess(file, header=header_row)
+def load_equity_sheet(file) -> pd.DataFrame:
+    df = _read_excel_guess(file, header=2)
 
-    if login_col is None or equity_col is None:
-        raise ValueError("Equity mapping missing: Please select Login and Equity columns in Column Mapping.")
+    login_col = _find_col_by_keywords(df, ["login", "account"])
+    equity_col = _find_col_by_keywords(df, ["equity"])
+
+    ccy_col = _find_col_by_keywords(df, ["currency", "ccy", "curr"], required=False)
 
     out = pd.DataFrame()
     out["Login"] = pd.to_numeric(df[login_col], errors="coerce").astype("Int64")
     out["Equity"] = pd.to_numeric(df[equity_col], errors="coerce").fillna(0.0)
-    out["Currency"] = df[currency_col].astype(str) if currency_col else "USD"
+    out["Currency"] = df[ccy_col].astype(str) if ccy_col else "USD"
+
+    out = out[out["Login"].notna()].copy()
     return out
 
-def load_summary_sheet_mapped(
-    file,
-    header_row=2,
-    login_col=None,
-    netdpwd_col=None,
-    credit_col=None,
-    closedvol_col=None,
-    commission_col=None,
-    swap_col=None,
-) -> pd.DataFrame:
-    raw = _read_excel_guess(file, header=header_row)
+def load_summary_sheet(file) -> pd.DataFrame:
+    """
+    Auto-detect columns in MT5 Summary export (English).
+    """
+    raw = _read_excel_guess(file, header=2)
 
-    if login_col is None or netdpwd_col is None:
-        raise ValueError("Summary mapping missing: Please select Login and NET DP/WD columns in Summary Column Mapping.")
+    login_col = _find_col_by_keywords(raw, ["login", "account"])
+    # NET DP/WD could be "NET DP/WD", "Net Deposit/Withdrawal", "Deposit", etc.
+    netdp_col = _find_col_by_keywords(raw, ["net dp", "net deposit", "deposit/withdraw", "dp/wd", "deposit"], required=True)
+
+    credit_col = _find_col_by_keywords(raw, ["credit"], required=False)
+    vol_col = _find_col_by_keywords(raw, ["closed volume", "volume"], required=False)
+    comm_col = _find_col_by_keywords(raw, ["commission"], required=False)
+    swap_col = _find_col_by_keywords(raw, ["swap"], required=False)
 
     df = pd.DataFrame()
     df["Login"] = pd.to_numeric(raw[login_col], errors="coerce").astype("Int64")
-    df["NET_DP_WD"] = pd.to_numeric(raw[netdpwd_col], errors="coerce").fillna(0.0)
-
+    df["NET_DP_WD"] = pd.to_numeric(raw[netdp_col], errors="coerce").fillna(0.0)
     df["Credit"] = pd.to_numeric(raw[credit_col], errors="coerce").fillna(0.0) if credit_col else 0.0
-    df["ClosedVolume"] = pd.to_numeric(raw[closedvol_col], errors="coerce").fillna(0.0) if closedvol_col else 0.0
-    df["Commission"] = pd.to_numeric(raw[commission_col], errors="coerce").fillna(0.0) if commission_col else 0.0
+    df["ClosedVolume"] = pd.to_numeric(raw[vol_col], errors="coerce").fillna(0.0) if vol_col else 0.0
+    df["Commission"] = pd.to_numeric(raw[comm_col], errors="coerce").fillna(0.0) if comm_col else 0.0
     df["Swap"] = pd.to_numeric(raw[swap_col], errors="coerce").fillna(0.0) if swap_col else 0.0
 
     df = df[df["Login"].notna()].copy()
@@ -261,9 +264,9 @@ def load_summary_sheet_mapped(
 
 def build_account_report(summary_df, closing_df, opening_df, accounts_df, eod_label) -> pd.DataFrame:
     base = closing_df.rename(columns={"Equity": "Closing Equity Raw"}).copy()
-    open_renamed = opening_df.rename(columns={"Equity": "Opening Equity Raw"})
+    open_df = opening_df.rename(columns={"Equity": "Opening Equity Raw"})
 
-    base = base.merge(open_renamed[["Login", "Opening Equity Raw"]], on="Login", how="left")
+    base = base.merge(open_df[["Login", "Opening Equity Raw"]], on="Login", how="left")
     base = base.merge(summary_df, on="Login", how="left")
 
     report = accounts_df.merge(base, on="Login", how="left")
@@ -271,7 +274,7 @@ def build_account_report(summary_df, closing_df, opening_df, accounts_df, eod_la
     for col in ["Closing Equity Raw", "Opening Equity Raw", "NET_DP_WD", "Credit", "ClosedVolume", "Commission", "Swap"]:
         report[col] = pd.to_numeric(report.get(col, 0.0), errors="coerce").fillna(0.0)
 
-    # ✅ Correct rule: ONLY negatives become 0; positives/0 stay same
+    # ✅ Your rule: ONLY negatives -> 0. Positive/0 stays same.
     report["Opening Equity"] = report["Opening Equity Raw"].clip(lower=0)
     report["Closing Equity"] = report["Closing Equity Raw"].clip(lower=0)
 
@@ -289,6 +292,11 @@ def build_account_report(summary_df, closing_df, opening_df, accounts_df, eod_la
         (report["NET PNL USD"] / report["Opening Equity"]) * 100.0,
         0.0,
     )
+
+    # Data quality flags (helps debugging without any mapping UI)
+    report["Missing_Summary"] = report["NET_DP_WD"].isna()
+    report["Missing_Opening_Eq"] = report["Opening Equity Raw"].isna()
+    report["Missing_Closing_Eq"] = report["Closing Equity Raw"].isna()
 
     report["EOD Closing Equity Date"] = eod_label
 
@@ -373,7 +381,7 @@ st.markdown(
     unsafe_allow_html=True,
 )
 st.markdown(
-    '<div class="section-caption">Upload Summary + Opening/Closing Equity + accounts. If some data is 0, use Column Mapping below.</div>',
+    '<div class="section-caption">No mapping needed. Tool auto-detects columns (English MT5 exports).</div>',
     unsafe_allow_html=True,
 )
 
@@ -392,9 +400,8 @@ with c2:
 with c3:
     opening_file = st.file_uploader("Sheet 3 – Opening Equity (prev EOD)", type=["xlsx", "xls"], key="opening")
 
-# A/B/Hybrid/Exclude row
+# Accounts row (include Exclude next to Hybrid)
 c5, c6, c7, c8 = st.columns(4)
-
 with c5:
     a_book_file = st.file_uploader("A-Book accounts", type=["xlsx", "xls", "csv"], key="abook")
 with c6:
@@ -411,61 +418,7 @@ st.markdown(
 )
 switch_file = st.file_uploader("Upload book switch file", type=["xlsx", "xls", "csv"], key="switch")
 
-# ============================================================
-# COLUMN MAPPING (EQUITY + SUMMARY)
-# ============================================================
-
-with st.expander("🧩 Column Mapping (Fix if equity / NET DP/WD is missing)", expanded=True):
-    # Read column lists
-    summary_cols = []
-    opening_cols = []
-    closing_cols = []
-
-    if summary_file is not None:
-        tmpS = _read_excel_guess(summary_file, header=2)
-        summary_cols = list(tmpS.columns)
-        summary_file.seek(0)
-
-    if closing_file is not None:
-        tmpC = _read_excel_guess(closing_file, header=2)
-        closing_cols = list(tmpC.columns)
-        closing_file.seek(0)
-
-    if opening_file is not None:
-        tmpO = _read_excel_guess(opening_file, header=2)
-        opening_cols = list(tmpO.columns)
-        opening_file.seek(0)
-
-    st.markdown("### Summary mapping (for NET DP/WD, Credit, etc.)")
-    s1, s2, s3 = st.columns(3)
-
-    with s1:
-        summary_login_pick = st.selectbox("Summary: Login column", options=summary_cols, disabled=not summary_cols)
-        summary_netdp_pick = st.selectbox("Summary: NET DP/WD column", options=summary_cols, disabled=not summary_cols)
-
-    with s2:
-        summary_credit_pick = st.selectbox("Summary: Credit column (optional)", options=["(none)"] + summary_cols, disabled=not summary_cols)
-        summary_comm_pick = st.selectbox("Summary: Commission column (optional)", options=["(none)"] + summary_cols, disabled=not summary_cols)
-
-    with s3:
-        summary_vol_pick = st.selectbox("Summary: Closed volume column (optional)", options=["(none)"] + summary_cols, disabled=not summary_cols)
-        summary_swap_pick = st.selectbox("Summary: Swap column (optional)", options=["(none)"] + summary_cols, disabled=not summary_cols)
-
-    st.markdown("---")
-    st.markdown("### Equity mapping (for Opening/Closing equity)")
-    e1, e2 = st.columns(2)
-
-    with e1:
-        st.markdown("**Closing file**")
-        closing_login_pick = st.selectbox("Closing: Login column", options=closing_cols, disabled=not closing_cols, key="cl_login")
-        closing_equity_pick = st.selectbox("Closing: Equity column", options=closing_cols, disabled=not closing_cols, key="cl_eq")
-        closing_ccy_pick = st.selectbox("Closing: Currency column (optional)", options=["(none)"] + closing_cols, disabled=not closing_cols, key="cl_ccy")
-
-    with e2:
-        st.markdown("**Opening file**")
-        opening_login_pick = st.selectbox("Opening: Login column", options=opening_cols, disabled=not opening_cols, key="op_login")
-        opening_equity_pick = st.selectbox("Opening: Equity column", options=opening_cols, disabled=not opening_cols, key="op_eq")
-        opening_ccy_pick = st.selectbox("Opening: Currency column (optional)", options=["(none)"] + opening_cols, disabled=not opening_cols, key="op_ccy")
+st.markdown("---")
 
 # ============================================================
 # PROCESSING
@@ -484,33 +437,10 @@ if st.button("🚀 Generate report"):
 
     try:
         with st.spinner("Processing files & calculating P&L…"):
+            summary_df = load_summary_sheet(summary_file)
+            closing_df = load_equity_sheet(closing_file)
+            opening_df = load_equity_sheet(opening_file)
 
-            # Summary (mapped)
-            summary_df = load_summary_sheet_mapped(
-                summary_file,
-                login_col=summary_login_pick if summary_cols else None,
-                netdpwd_col=summary_netdp_pick if summary_cols else None,
-                credit_col=None if (not summary_cols or summary_credit_pick == "(none)") else summary_credit_pick,
-                closedvol_col=None if (not summary_cols or summary_vol_pick == "(none)") else summary_vol_pick,
-                commission_col=None if (not summary_cols or summary_comm_pick == "(none)") else summary_comm_pick,
-                swap_col=None if (not summary_cols or summary_swap_pick == "(none)") else summary_swap_pick,
-            )
-
-            # Equity (mapped)
-            closing_df = load_equity_sheet(
-                closing_file,
-                login_col=closing_login_pick if closing_cols else None,
-                equity_col=closing_equity_pick if closing_cols else None,
-                currency_col=None if (not closing_cols or closing_ccy_pick == "(none)") else closing_ccy_pick,
-            )
-            opening_df = load_equity_sheet(
-                opening_file,
-                login_col=opening_login_pick if opening_cols else None,
-                equity_col=opening_equity_pick if opening_cols else None,
-                currency_col=None if (not opening_cols or opening_ccy_pick == "(none)") else opening_ccy_pick,
-            )
-
-            # Accounts mapping
             frames = []
             if a_book_file:
                 frames.append(load_book_accounts(a_book_file, "A-Book"))
@@ -526,37 +456,50 @@ if st.button("🚀 Generate report"):
             exclude_set |= _read_exclude_file(exclude_file)
             exclude_set |= _parse_exclude_text(exclude_text)
 
-            before_cnt = accounts_df["Login"].nunique()
+            before_cnt = int(accounts_df["Login"].nunique())
             if exclude_set:
                 accounts_df = accounts_df[~accounts_df["Login"].astype("Int64").isin(list(exclude_set))].copy()
-            after_cnt = accounts_df["Login"].nunique()
+            after_cnt = int(accounts_df["Login"].nunique())
             excluded_cnt = max(0, before_cnt - after_cnt)
 
             # Switch
             switch_df = load_switch_file(switch_file) if switch_file is not None else pd.DataFrame()
 
-            # Build reports
+            # Report
             account_df = build_account_report(summary_df, closing_df, opening_df, accounts_df, eod_label)
             book_df = build_book_summary(account_df, switch_df)
 
         # ====================================================
-        # DATA HEALTH CHECKS (prevents “0 everywhere” confusion)
+        # Health checks (no mapping UI, but still safe)
         # ====================================================
         if account_df["Opening Equity Raw"].abs().sum() == 0 and account_df["Closing Equity Raw"].abs().sum() == 0:
-            st.error("⚠️ Equity looks like ALL ZERO. Your Equity column selection is wrong. Fix in Column Mapping.")
+            st.error("⚠️ Equity looks like ALL ZERO. Your equity file may not be an Equity report or column headers differ.")
             st.stop()
 
-        if summary_df["NET_DP_WD"].abs().sum() == 0 and summary_df["Credit"].abs().sum() == 0:
-            st.warning("⚠️ Summary NET DP/WD and Credit are all zero. Likely Summary mapping is wrong. Fix in Column Mapping.")
-
-        # Missing summary logins diagnostics
+        # Missing accounts diagnostics
         acc_set = set(accounts_df["Login"].dropna().astype(int).tolist())
         sum_set = set(summary_df["Login"].dropna().astype(int).tolist())
-        missing_in_summary = acc_set - sum_set
-        if len(missing_in_summary) > 0:
-            st.warning(f"⚠️ {len(missing_in_summary)} account(s) are missing in Summary file (NET DP/WD will be 0 for them).")
-            with st.expander("Show missing logins (first 100)"):
-                st.dataframe(pd.DataFrame({"Missing_Logins": sorted(list(missing_in_summary))[:100]}), use_container_width=True)
+        miss_summary = acc_set - sum_set
+
+        eq_close_set = set(closing_df["Login"].dropna().astype(int).tolist())
+        eq_open_set = set(opening_df["Login"].dropna().astype(int).tolist())
+        miss_close = acc_set - eq_close_set
+        miss_open = acc_set - eq_open_set
+
+        if len(miss_summary) > 0:
+            st.warning(f"⚠️ {len(miss_summary)} account(s) are missing in Summary file → NET DP/WD will be 0 for them.")
+            with st.expander("Show missing in Summary (first 100)"):
+                st.dataframe(pd.DataFrame({"Missing_Summary_Logins": sorted(list(miss_summary))[:100]}), use_container_width=True)
+
+        if len(miss_close) > 0 or len(miss_open) > 0:
+            st.warning("⚠️ Some accounts are missing in Opening/Closing equity reports.")
+            with st.expander("Show missing in Equity (first 100)"):
+                if len(miss_open) > 0:
+                    st.write("Missing in Opening Equity:")
+                    st.dataframe(pd.DataFrame({"Missing_Opening_Logins": sorted(list(miss_open))[:100]}), use_container_width=True)
+                if len(miss_close) > 0:
+                    st.write("Missing in Closing Equity:")
+                    st.dataframe(pd.DataFrame({"Missing_Closing_Logins": sorted(list(miss_close))[:100]}), use_container_width=True)
 
         # ====================================================
         # KPIs
@@ -651,7 +594,6 @@ if st.button("🚀 Generate report"):
             unsafe_allow_html=True,
         )
 
-        # Build top sheet combined
         top_g = account_df.sort_values("NET PNL USD", ascending=False).head(top_n).copy()
         top_l = account_df.sort_values("NET PNL USD", ascending=True).head(top_n).copy()
         top_g["RankType"] = "Top Gainers"
