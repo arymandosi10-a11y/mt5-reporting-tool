@@ -16,51 +16,28 @@ st.set_page_config(
 st.markdown(
     """
     <style>
-    .main {
-        background: radial-gradient(circle at top left, #ffffff 0, #f5f7fb 55%, #e9edf5 100%);
-        color: #111827;
-        font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif;
-    }
+    .main { background: radial-gradient(circle at top left, #ffffff 0, #f5f7fb 55%, #e9edf5 100%); color: #111827;
+            font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif; }
     .block-container { padding-top: 1.5rem; padding-bottom: 3rem; max-width: 1300px; }
 
-    .hero-card {
-        background: linear-gradient(135deg, #111827, #1f2937);
-        color: #f9fafb;
-        border-radius: 22px;
-        padding: 1.8rem 2.2rem 1.6rem 2.2rem;
-        box-shadow: 0 18px 50px rgba(15, 23, 42, 0.45);
-        position: relative;
-        overflow: hidden;
-    }
-    .hero-badge {
-        display: inline-flex; align-items: center; gap: 0.4rem;
-        padding: 0.15rem 0.7rem; border-radius: 999px;
-        background: rgba(55, 65, 81, 0.8);
-        font-size: 0.75rem; font-weight: 500;
-        letter-spacing: .04em; text-transform: uppercase;
-    }
+    .hero-card { background: linear-gradient(135deg, #111827, #1f2937); color: #f9fafb; border-radius: 22px;
+                padding: 1.8rem 2.2rem 1.6rem 2.2rem; box-shadow: 0 18px 50px rgba(15, 23, 42, 0.45);
+                position: relative; overflow: hidden; }
+    .hero-badge { display: inline-flex; align-items: center; gap: 0.4rem; padding: 0.15rem 0.7rem; border-radius: 999px;
+                background: rgba(55, 65, 81, 0.8); font-size: 0.75rem; font-weight: 500; letter-spacing: .04em;
+                text-transform: uppercase; }
     .hero-title { font-size: 2.0rem; font-weight: 700; margin-top: 0.7rem; margin-bottom: 0.4rem; }
     .hero-subtitle { font-size: 0.97rem; color: #d1d5db; max-width: 580px; }
 
-    .metric-card {
-        background: #ffffff; border-radius: 16px;
-        padding: 0.9rem 1.1rem; border: 1px solid #e5e7eb;
-        box-shadow: 0 12px 30px rgba(148, 163, 184, 0.24);
-    }
+    .metric-card { background: #ffffff; border-radius: 16px; padding: 0.9rem 1.1rem; border: 1px solid #e5e7eb;
+                box-shadow: 0 12px 30px rgba(148, 163, 184, 0.24); }
     .metric-label { font-size: 0.78rem; color: #6b7280; text-transform: uppercase; letter-spacing: .06em; }
     .metric-value { font-size: 1.25rem; font-weight: 600; margin-top: 0.15rem; }
 
-    .section-title {
-        font-size: 1.1rem; font-weight: 650;
-        margin-top: 1.8rem; margin-bottom: 0.4rem;
-        display: flex; align-items: center; gap: 0.5rem;
-    }
-    .section-title span.badge {
-        background: #e5f3ff; color: #1d4ed8;
-        border-radius: 999px; font-size: 0.72rem;
-        padding: 0.2rem 0.7rem; text-transform: uppercase;
-        letter-spacing: .06em; font-weight: 600;
-    }
+    .section-title { font-size: 1.1rem; font-weight: 650; margin-top: 1.8rem; margin-bottom: 0.4rem;
+                    display: flex; align-items: center; gap: 0.5rem; }
+    .section-title span.badge { background: #e5f3ff; color: #1d4ed8; border-radius: 999px; font-size: 0.72rem;
+                                padding: 0.2rem 0.7rem; text-transform: uppercase; letter-spacing: .06em; font-weight: 600; }
     .section-caption { font-size: 0.87rem; color: #6b7280; margin-bottom: 0.6rem; }
 
     [data-testid="stSidebar"] { background: #f8fafc; border-right: 1px solid #e5e7eb; }
@@ -84,100 +61,209 @@ st.markdown(
 )
 
 # ============================================================
-# HELPERS (OLD LOGIC – FIXED COLUMN POSITIONS)
+# ROBUST READ HELPERS (NO MAPPING UI)
 # ============================================================
 
-def load_summary_sheet(file) -> pd.DataFrame:
+def _read_excel_try_headers(file, header_candidates=(0, 1, 2, 3, 4, None)):
+    """Try multiple header rows. Returns list of (header_used, df)."""
+    dfs = []
+    for h in header_candidates:
+        try:
+            file.seek(0)
+            df = pd.read_excel(file, header=h)
+            dfs.append((h, df))
+        except Exception:
+            continue
+    if not dfs:
+        raise ValueError("Unable to read Excel file.")
+    return dfs
+
+def _normalize_cols(df: pd.DataFrame):
+    cols = []
+    for c in df.columns:
+        c = str(c).strip()
+        c = c.replace("\n", " ").replace("\r", " ")
+        cols.append(c)
+    df = df.copy()
+    df.columns = cols
+    return df
+
+def _best_login_col(df: pd.DataFrame):
+    """Find column that looks like Login (most numeric ints of length 4-10)."""
+    best = None
+    best_score = -1
+    for c in df.columns:
+        s = pd.to_numeric(df[c], errors="coerce")
+        ok = s.dropna()
+        if ok.empty:
+            continue
+        # score: count of integer-like values
+        score = int(((ok % 1) == 0).sum())
+        # boost if column name contains login
+        if "login" in str(c).lower():
+            score += 100000
+        if score > best_score:
+            best_score = score
+            best = c
+    return best
+
+def _find_col_by_keywords(df: pd.DataFrame, keywords):
+    cols_lower = [str(c).strip().lower() for c in df.columns]
+    for kw in keywords:
+        for i, c in enumerate(cols_lower):
+            if kw in c:
+                return df.columns[i]
+    return None
+
+def _choose_best_df_for_equity(file):
+    """Pick best (header, df) where login+equity can be detected and equity has non-zero coverage."""
+    candidates = _read_excel_try_headers(file)
+    best = None
+    best_score = -1
+
+    for h, df in candidates:
+        df = _normalize_cols(df)
+        if df.empty or len(df.columns) < 2:
+            continue
+
+        login_col = _find_col_by_keywords(df, ["login"]) or _best_login_col(df)
+        eq_col = _find_col_by_keywords(df, ["equity"])
+        if eq_col is None:
+            # fallback: try columns that have many numeric values and big magnitudes
+            num_scores = []
+            for c in df.columns:
+                s = pd.to_numeric(df[c], errors="coerce")
+                ok = s.dropna()
+                if ok.empty:
+                    continue
+                # equity often has larger absolute values than small counters
+                score = int((ok.abs() > 1).sum())
+                num_scores.append((score, c))
+            num_scores.sort(reverse=True)
+            eq_col = num_scores[0][1] if num_scores else None
+
+        if login_col is None or eq_col is None:
+            continue
+
+        logins = pd.to_numeric(df[login_col], errors="coerce").dropna()
+        equity = pd.to_numeric(df[eq_col], errors="coerce").dropna()
+
+        if logins.empty or equity.empty:
+            continue
+
+        # scoring: many logins + many nonzero equities
+        score = len(logins) + int((equity != 0).sum()) * 2
+        if score > best_score:
+            best_score = score
+            best = (h, df, login_col, eq_col)
+
+    if best is None:
+        raise ValueError("Could not auto-detect Login/Equity columns. Your MT5 export format is unusual.")
+    return best  # header, df, login_col, equity_col
+
+def _choose_best_df_for_summary(file):
     """
-    MT5 Summary export (OLD fixed columns)
-    Columns by index (0-based):
-        0: Login
-        4: NET DP/WD
-        5: Credit
-        7: Closed volume
-        8: Commission
-        10: Swap
+    Auto-detect summary columns:
+    Login, NET DP/WD (or Net Deposit/Withdrawal), Credit, Closed Volume, Commission, Swap
     """
-    try:
-        raw = pd.read_excel(file, header=2)
-    except Exception:
-        file.seek(0)
-        raw = pd.read_excel(file)
+    candidates = _read_excel_try_headers(file)
+    best = None
+    best_score = -1
 
-    if raw.shape[1] < 11:
-        raise ValueError("Summary sheet must contain at least 11 columns (up to column K).")
+    for h, df in candidates:
+        df = _normalize_cols(df)
+        if df.empty:
+            continue
 
-    df = pd.DataFrame()
-    df["Login"] = pd.to_numeric(raw.iloc[:, 0], errors="coerce").astype("Int64")
-    df["NET_DP_WD"] = pd.to_numeric(raw.iloc[:, 4], errors="coerce").fillna(0.0)
-    df["Credit"] = pd.to_numeric(raw.iloc[:, 5], errors="coerce").fillna(0.0)
-    df["ClosedVolume"] = pd.to_numeric(raw.iloc[:, 7], errors="coerce").fillna(0.0)
-    df["Commission"] = pd.to_numeric(raw.iloc[:, 8], errors="coerce").fillna(0.0)
-    df["Swap"] = pd.to_numeric(raw.iloc[:, 10], errors="coerce").fillna(0.0)
+        login_col = _find_col_by_keywords(df, ["login"]) or _best_login_col(df)
+        if login_col is None:
+            continue
 
-    # remove non-login rows
-    df = df[df["Login"].notna()].copy()
+        # net dp/wd keywords vary
+        net_col = (
+            _find_col_by_keywords(df, ["net dp", "net dp/wd", "net deposit", "net d", "net deposit/withdraw", "net_deposit"])
+        )
+        # some MT5 uses "Deposit/Withdrawal" or "D/W"
+        if net_col is None:
+            net_col = _find_col_by_keywords(df, ["deposit", "withdraw", "dp/wd", "d/w"])
 
-    grouped = (
-        df.groupby("Login", as_index=False)[
-            ["NET_DP_WD", "Credit", "ClosedVolume", "Commission", "Swap"]
-        ].sum()
-    )
-    return grouped
+        credit_col = _find_col_by_keywords(df, ["credit"])
+        vol_col = _find_col_by_keywords(df, ["closed volume", "volume", "vol"])
+        comm_col = _find_col_by_keywords(df, ["commission", "comm"])
+        swap_col = _find_col_by_keywords(df, ["swap"])
 
+        # If still missing NET column, fallback: old fixed index (E = col 4) ONLY if exists
+        if net_col is None and len(df.columns) > 4:
+            net_col = df.columns[4]
+
+        # scoring: must have login+net at least
+        if net_col is None:
+            continue
+
+        logins = pd.to_numeric(df[login_col], errors="coerce").dropna()
+        netv = pd.to_numeric(df[net_col], errors="coerce").dropna()
+        if logins.empty:
+            continue
+
+        score = len(logins) + int((netv != 0).sum()) * 2
+        # boost if we found more optional cols
+        score += 1000 if credit_col is not None else 0
+        score += 1000 if vol_col is not None else 0
+        score += 1000 if comm_col is not None else 0
+        score += 1000 if swap_col is not None else 0
+
+        if score > best_score:
+            best_score = score
+            best = (h, df, login_col, net_col, credit_col, vol_col, comm_col, swap_col)
+
+    if best is None:
+        raise ValueError("Could not auto-detect Summary columns (Login/NET DP/WD).")
+    return best
+
+# ============================================================
+# LOADERS
+# ============================================================
 
 def load_equity_sheet(file) -> pd.DataFrame:
-    """
-    MT5 Daily report (OLD logic)
-    We keep the same behavior:
-        Login -> column 0
-        Equity -> column 9 (J) (fallback if less columns)
-        Currency -> if found by header name else USD
-    """
-    try:
-        df = pd.read_excel(file, header=2)
-    except Exception:
-        file.seek(0)
-        df = pd.read_excel(file)
-
-    cols_lower = [str(c).strip().lower() for c in df.columns]
-
-    # Login (default col0)
-    login_col = df.columns[0]
-
-    # Equity (default col9)
-    equity_col = df.columns[9] if len(df.columns) > 9 else df.columns[1]
-
-    # Currency optional by header name
-    currency_col = None
-    for opt in ["currency", "curr", "ccy"]:
-        if opt in cols_lower:
-            currency_col = df.columns[cols_lower.index(opt)]
-            break
-
+    h, df, login_col, equity_col = _choose_best_df_for_equity(file)
+    df = df.copy()
     out = pd.DataFrame()
     out["Login"] = pd.to_numeric(df[login_col], errors="coerce").astype("Int64")
     out["Equity"] = pd.to_numeric(df[equity_col], errors="coerce").fillna(0.0)
+
+    # Currency optional
+    currency_col = _find_col_by_keywords(df, ["currency", "ccy", "curr"])
     out["Currency"] = df[currency_col].astype(str) if currency_col is not None else "USD"
 
     out = out[out["Login"].notna()].copy()
     return out
 
+def load_summary_sheet(file) -> pd.DataFrame:
+    h, df, login_col, net_col, credit_col, vol_col, comm_col, swap_col = _choose_best_df_for_summary(file)
+    df = df.copy()
+
+    tmp = pd.DataFrame()
+    tmp["Login"] = pd.to_numeric(df[login_col], errors="coerce").astype("Int64")
+    tmp["NET_DP_WD"] = pd.to_numeric(df[net_col], errors="coerce").fillna(0.0)
+    tmp["Credit"] = pd.to_numeric(df[credit_col], errors="coerce").fillna(0.0) if credit_col is not None else 0.0
+    tmp["ClosedVolume"] = pd.to_numeric(df[vol_col], errors="coerce").fillna(0.0) if vol_col is not None else 0.0
+    tmp["Commission"] = pd.to_numeric(df[comm_col], errors="coerce").fillna(0.0) if comm_col is not None else 0.0
+    tmp["Swap"] = pd.to_numeric(df[swap_col], errors="coerce").fillna(0.0) if swap_col is not None else 0.0
+
+    tmp = tmp[tmp["Login"].notna()].copy()
+    grouped = tmp.groupby("Login", as_index=False)[["NET_DP_WD", "Credit", "ClosedVolume", "Commission", "Swap"]].sum()
+    return grouped
 
 def _read_accounts_file(file) -> pd.DataFrame:
     name = file.name.lower()
-    if name.endswith(".csv"):
-        df = pd.read_csv(file)
-    else:
-        df = pd.read_excel(file)
+    df = pd.read_csv(file) if name.endswith(".csv") else pd.read_excel(file)
+    df = _normalize_cols(df)
 
     lower_cols = {str(c).lower(): c for c in df.columns}
-
     if "login" in lower_cols:
         df = df.rename(columns={lower_cols["login"]: "Login"})
     if "group" in lower_cols:
         df = df.rename(columns={lower_cols["group"]: "Group"})
-
     if "Login" not in df.columns:
         df = df.rename(columns={df.columns[0]: "Login"})
     if "Group" not in df.columns:
@@ -188,20 +274,18 @@ def _read_accounts_file(file) -> pd.DataFrame:
     out = out[out["Login"].notna()].copy()
     return out
 
-
 def load_book_accounts(file, book_type: str) -> pd.DataFrame:
     df = _read_accounts_file(file)
     df["OrigType"] = book_type
     df["Type"] = book_type
     return df
 
-
 def load_switch_file(file) -> pd.DataFrame:
     name = file.name.lower()
     df = pd.read_csv(file) if name.endswith(".csv") else pd.read_excel(file)
+    df = _normalize_cols(df)
 
     lower = {str(c).lower(): c for c in df.columns}
-
     def pick(colname):
         key = colname.lower()
         if key not in lower:
@@ -214,7 +298,6 @@ def load_switch_file(file) -> pd.DataFrame:
     out["ToType"] = df[pick("totype")].astype(str)
     out["ShiftEquity"] = pd.to_numeric(df[pick("shiftequity")], errors="coerce").fillna(0.0)
 
-    # optional HybridRatio
     hr_col = None
     for k in lower.keys():
         if k.startswith("hybridratio"):
@@ -230,8 +313,10 @@ def load_switch_file(file) -> pd.DataFrame:
     out = out[out["Login"].notna()].copy()
     return out
 
+# ============================================================
+# EXCLUDE HELPERS
+# ============================================================
 
-# ✅ NEW: Exclude accounts helper (file + paste)
 def _parse_exclude_text(text: str) -> set[int]:
     if not text:
         return set()
@@ -245,24 +330,30 @@ def _parse_exclude_text(text: str) -> set[int]:
             pass
     return out
 
-
 def _read_exclude_file(file) -> set[int]:
     if file is None:
         return set()
     name = file.name.lower()
     df = pd.read_csv(file) if name.endswith(".csv") else pd.read_excel(file)
-    col0 = df.columns[0]
-    if any(str(c).strip().lower() == "login" for c in df.columns):
-        for c in df.columns:
-            if str(c).strip().lower() == "login":
-                col0 = c
-                break
-    ser = pd.to_numeric(df[col0], errors="coerce").dropna()
+    df = _normalize_cols(df)
+
+    col = None
+    for c in df.columns:
+        if str(c).strip().lower() == "login":
+            col = c
+            break
+    if col is None:
+        col = df.columns[0]
+
+    ser = pd.to_numeric(df[col], errors="coerce").dropna()
     return set(ser.astype(int).tolist())
 
+# ============================================================
+# CALCULATION
+# ============================================================
 
 def build_account_report(summary_df, closing_df, opening_df, accounts_df, eod_label) -> pd.DataFrame:
-    base = closing_df.rename(columns={"Equity": "Closing Equity", "Currency": "Currency"}).copy()
+    base = closing_df.rename(columns={"Equity": "Closing Equity"}).copy()
     open_renamed = opening_df.rename(columns={"Equity": "Opening Equity"})
     base = base.merge(open_renamed[["Login", "Opening Equity"]], on="Login", how="left")
     base = base.merge(summary_df, on="Login", how="left")
@@ -274,9 +365,7 @@ def build_account_report(summary_df, closing_df, opening_df, accounts_df, eod_la
 
     report["Closed Lots"] = report["ClosedVolume"] / 2.0
 
-    # ✅ Your exact rule:
-    # ONLY if opening/closing is negative -> treat as 0
-    # (positive and 0 remain same)
+    # ✅ Your rule: only negative equity becomes 0 (positive/0 unchanged)
     report["Opening Equity"] = np.where(report["Opening Equity"] < 0, 0.0, report["Opening Equity"])
     report["Closing Equity"] = np.where(report["Closing Equity"] < 0, 0.0, report["Closing Equity"])
 
@@ -297,10 +386,8 @@ def build_account_report(summary_df, closing_df, opening_df, accounts_df, eod_la
 
     final_cols = [
         "Login", "Group", "OrigType", "Type",
-        "Closed Lots",
-        "NET_DP_WD", "Credit",
-        "Currency",
-        "Opening Equity", "Closing Equity",
+        "Closed Lots", "NET_DP_WD", "Credit",
+        "Currency", "Opening Equity", "Closing Equity",
         "NET PNL USD", "NET PNL %",
         "Commission", "Swap",
         "EOD Closing Equity Date",
@@ -308,11 +395,9 @@ def build_account_report(summary_df, closing_df, opening_df, accounts_df, eod_la
     report = report[final_cols].sort_values("Login").reset_index(drop=True)
     return report
 
-
 def build_book_summary(account_df: pd.DataFrame, switch_df: pd.DataFrame) -> pd.DataFrame:
     rows = []
     switch_map = {}
-
     if switch_df is not None and not switch_df.empty:
         for _, r in switch_df.iterrows():
             if pd.notna(r.get("Login")):
@@ -359,9 +444,28 @@ def build_book_summary(account_df: pd.DataFrame, switch_df: pd.DataFrame) -> pd.
     )
     return book
 
+def _health_check(account_df: pd.DataFrame):
+    """Warn if report looks 'all zeros' due to wrong parsing."""
+    if account_df.empty:
+        st.error("No accounts produced.")
+        return
+
+    n = len(account_df)
+    zero_pnl = int((account_df["NET PNL USD"] == 0).sum())
+    zero_net = int((account_df["NET_DP_WD"] == 0).sum())
+    zero_open = int((account_df["Opening Equity"] == 0).sum())
+    zero_close = int((account_df["Closing Equity"] == 0).sum())
+
+    # If most rows are zero, likely parsing mismatch
+    if (zero_pnl / n) > 0.85 and (zero_open / n) > 0.85 and (zero_close / n) > 0.85:
+        st.warning(
+            "⚠️ Data Health Warning: Most PNL/Open/Close are 0. "
+            "This usually means MT5 export columns are different than expected or file is not the correct report type. "
+            "This version auto-detects, but if your report is a different MT5 template, please export the standard Summary/Daily reports."
+        )
 
 # ============================================================
-# UI – UPLOADS (Exclude next to Hybrid)
+# UI – UPLOADS
 # ============================================================
 
 st.markdown(
@@ -369,7 +473,7 @@ st.markdown(
     unsafe_allow_html=True,
 )
 st.markdown(
-    '<div class="section-caption">Restored to old report logic + only your requested changes.</div>',
+    '<div class="section-caption">Only your requested changes + silent auto-detection (no mapping screen).</div>',
     unsafe_allow_html=True,
 )
 
@@ -393,7 +497,7 @@ with c6:
 with c7:
     hybrid_file = st.file_uploader("Hybrid accounts (optional)", type=["xlsx", "xls", "csv"], key="hybrid")
 
-# ✅ Exclude accounts option (front side next to Hybrid)
+# ✅ Exclude accounts next to Hybrid
 with c8:
     exclude_file = st.file_uploader("Exclude accounts (file)", type=["xlsx", "xls", "csv"], key="exclude_file")
     exclude_text = st.text_area("Exclude accounts (paste)", height=90, placeholder="10001\n10002\n10003", key="exclude_text")
@@ -405,7 +509,6 @@ st.markdown(
 switch_file = st.file_uploader("Upload book switch file", type=["xlsx", "xls", "csv"], key="switch")
 
 st.markdown("---")
-
 top_n = st.sidebar.slider("Top gainers/losers count", 5, 50, 10, 5)
 
 # ============================================================
@@ -440,7 +543,7 @@ if st.button("🚀 Generate report"):
             accounts_df = pd.concat(frames, ignore_index=True)
             accounts_df = accounts_df.drop_duplicates(subset=["Login"], keep="first")
 
-            # ✅ Exclude processing
+            # Exclude
             exclude_set = set()
             exclude_set |= _read_exclude_file(exclude_file)
             exclude_set |= _parse_exclude_text(exclude_text)
@@ -451,15 +554,16 @@ if st.button("🚀 Generate report"):
             after_cnt = int(accounts_df["Login"].nunique())
             excluded_cnt = max(0, before_cnt - after_cnt)
 
-            # optional switch file
+            # Switch file
             switch_df = load_switch_file(switch_file) if switch_file is not None else pd.DataFrame()
 
             account_df = build_account_report(summary_df, closing_df, opening_df, accounts_df, eod_label)
             book_df = build_book_summary(account_df, switch_df)
 
-        # ====================================================
+        # Health check
+        _health_check(account_df)
+
         # KPIs
-        # ====================================================
         st.markdown(
             '<div class="section-title"><span class="badge">3</span><span>High-level snapshot</span></div>',
             unsafe_allow_html=True,
@@ -500,9 +604,7 @@ if st.button("🚀 Generate report"):
             st.markdown(f'<div class="metric-value">P {profit_pct:.1f}% / L {loss_pct:.1f}%</div>', unsafe_allow_html=True)
             st.markdown("</div>", unsafe_allow_html=True)
 
-        # ====================================================
-        # ✅ Top gainer / Top loser accounts
-        # ====================================================
+        # Top gainers/losers
         st.markdown(
             '<div class="section-title"><span class="badge">4</span><span>Top gainer & top loser accounts</span></div>',
             unsafe_allow_html=True,
@@ -515,9 +617,7 @@ if st.button("🚀 Generate report"):
             st.markdown(f"**Top {top_n} losers**")
             st.dataframe(account_df.sort_values("NET PNL USD", ascending=True).head(top_n), use_container_width=True)
 
-        # ====================================================
-        # All accounts net P&L
-        # ====================================================
+        # All accounts
         st.markdown(
             '<div class="section-title"><span class="badge">5</span><span>All accounts net P&L</span></div>',
             unsafe_allow_html=True,
@@ -525,18 +625,14 @@ if st.button("🚀 Generate report"):
         st.info("Rule: ONLY if Opening/Closing Equity is NEGATIVE → treated as 0. Positive & 0 stays unchanged.")
         st.dataframe(account_df, use_container_width=True)
 
-        # ====================================================
-        # Book wise overall P&L
-        # ====================================================
+        # Books
         st.markdown(
             '<div class="section-title"><span class="badge">6</span><span>Book wise overall P&L</span></div>',
             unsafe_allow_html=True,
         )
         st.dataframe(book_df, use_container_width=True)
 
-        # ====================================================
-        # Excel output (ONLY 3 sheets you requested)
-        # ====================================================
+        # Excel (only your 3 sheets)
         st.markdown(
             '<div class="section-title"><span class="badge">7</span><span>Download Excel report</span></div>',
             unsafe_allow_html=True,
