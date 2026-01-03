@@ -107,50 +107,52 @@ def load_summary_sheet(file: BytesIO) -> pd.DataFrame:
     """
     Sheet 1 – Summary / Transactions.
 
-    MT5 export (0-based indexes):
+    REQUIRED (0-based indexes):
         0: Login
-        2: Deposit          [optional, not required]
-        3: Withdrawal       [optional, not required]
-        4: NET DP/WD        <= **WE USE THIS**
-        7: Volume           <= used for Closed Lots = Volume / 2
-        8: Commission       (column I)
-        10: Swap            (column K)
+        4: NET DP/WD        (Excel col E)
+        5: Credit           (Excel col F)
+        7: Volume/Lots      (Excel col H) -> Closed Lots = Volume / 2
+
+    OPTIONAL (kept if present in your export):
+        8: Commission       (Excel col I)
+        10: Swap            (Excel col K)
     """
     name = file.name.lower()
     if name.endswith(".csv"):
         raw = pd.read_csv(file)
     else:
-        # most MT5 exports have 2 header lines → data from row 3
+        # MT5 exports often have 2 header rows; fallback if not.
         try:
             raw = pd.read_excel(file, header=2)
         except Exception:
             raw = pd.read_excel(file)
 
-    if raw.shape[1] < 11:
-        raise ValueError("Summary sheet must have at least 11 columns (up to column K).")
+    if raw.shape[1] < 8:
+        raise ValueError("Summary sheet must have at least 8 columns (up to column H).")
 
     df = pd.DataFrame()
     df["Login"] = pd.to_numeric(raw.iloc[:, 0], errors="coerce").astype("Int64")
 
-    # Optional: Deposit / Withdrawal (not needed for formula)
-    df["Deposit_raw"] = pd.to_numeric(raw.iloc[:, 2], errors="coerce").fillna(0.0)
-    df["Withdrawal_raw"] = pd.to_numeric(raw.iloc[:, 3], errors="coerce").fillna(0.0)
-
     # NET DP/WD from column E (index 4)
     df["NET_DP_WD"] = pd.to_numeric(raw.iloc[:, 4], errors="coerce").fillna(0.0)
 
-    # Closed volume from column H (index 7)
+    # Credit from column F (index 5)
+    df["Credit"] = pd.to_numeric(raw.iloc[:, 5], errors="coerce").fillna(0.0)
+
+    # Volume/Lots from column H (index 7)
     df["ClosedVolume"] = pd.to_numeric(raw.iloc[:, 7], errors="coerce").fillna(0.0)
 
-    # Commission from column I (index 8)
-    df["Commission"] = pd.to_numeric(raw.iloc[:, 8], errors="coerce").fillna(0.0)
-
-    # Swap from column K (index 10)
-    df["Swap"] = pd.to_numeric(raw.iloc[:, 10], errors="coerce").fillna(0.0)
+    # Optional columns if exist
+    df["Commission"] = 0.0
+    df["Swap"] = 0.0
+    if raw.shape[1] >= 9:
+        df["Commission"] = pd.to_numeric(raw.iloc[:, 8], errors="coerce").fillna(0.0)
+    if raw.shape[1] >= 11:
+        df["Swap"] = pd.to_numeric(raw.iloc[:, 10], errors="coerce").fillna(0.0)
 
     grouped = (
         df.groupby("Login", as_index=False)[
-            ["Deposit_raw", "Withdrawal_raw", "NET_DP_WD", "ClosedVolume", "Commission", "Swap"]
+            ["NET_DP_WD", "Credit", "ClosedVolume", "Commission", "Swap"]
         ]
         .sum()
     )
@@ -159,8 +161,8 @@ def load_summary_sheet(file: BytesIO) -> pd.DataFrame:
 
 def load_equity_sheet(file: BytesIO) -> pd.DataFrame:
     """
-    Sheet 2 / 3 – Equity report (daily snapshot).
-    We only need Login, Equity and optional Currency.
+    Sheet 2 / 3 – Equity report.
+    You said equity is always in column J, so default_idx=9 (0-based).
     """
     try:
         df = pd.read_excel(file, header=2)
@@ -179,6 +181,7 @@ def load_equity_sheet(file: BytesIO) -> pd.DataFrame:
 
     login_col = find_col(["login"], 0)
     equity_col = find_col(["equity"], 9)  # J by default
+
     currency_col = None
     for opt in ["currency", "curr", "ccy"]:
         if opt in cols_lower:
@@ -188,10 +191,7 @@ def load_equity_sheet(file: BytesIO) -> pd.DataFrame:
     out = pd.DataFrame()
     out["Login"] = pd.to_numeric(df[login_col], errors="coerce").astype("Int64")
     out["Equity"] = pd.to_numeric(df[equity_col], errors="coerce").fillna(0.0)
-    if currency_col is not None:
-        out["Currency"] = df[currency_col].astype(str)
-    else:
-        out["Currency"] = "USD"
+    out["Currency"] = df[currency_col].astype(str) if currency_col is not None else "USD"
     return out
 
 
@@ -203,7 +203,7 @@ def _read_accounts_file(file: BytesIO) -> pd.DataFrame:
     else:
         df = pd.read_excel(file)
 
-    lower = {c.lower(): c for c in df.columns}
+    lower = {str(c).lower(): c for c in df.columns}
     if "login" in lower and "Login" not in df.columns:
         df = df.rename(columns={lower["login"]: "Login"})
     if "group" in lower and "Group" not in df.columns:
@@ -232,11 +232,9 @@ def load_switches_file(file: BytesIO) -> pd.DataFrame:
 
     Expected columns (case-insensitive):
       - Login
-      - FromType  (A-Book / B-Book / Hybrid)
-      - ToType    (A-Book / B-Book / Hybrid)
-      - ShiftEquity  (equity at the time of switch)
-
-    We *only* split daily P&L into Old book / New book using ShiftEquity.
+      - FromType
+      - ToType
+      - ShiftEquity
     """
     name = file.name.lower()
     if name.endswith(".csv"):
@@ -244,7 +242,7 @@ def load_switches_file(file: BytesIO) -> pd.DataFrame:
     else:
         df = pd.read_excel(file)
 
-    lower = {c.lower(): c for c in df.columns}
+    lower = {str(c).lower(): c for c in df.columns}
 
     def pick(col):
         for k, v in lower.items():
@@ -264,75 +262,75 @@ def build_report(summary_df, closing_df, opening_df, accounts_df, switches_df, e
     """
     Merge everything and compute per-account metrics.
 
-    Formula:
-        NET PNL USD = ClosingEquity - OpeningEquity - NET DP/WD
+    Net PNL Formula (per your request):
+        NET PNL USD = ClosingEquity - OpeningEquity - NetDPWD - Credit
+
+    Also IMPORTANT:
+        If Opening Equity < 0 -> treat as 0
+        If Closing Equity < 0 -> treat as 0
     """
-    # --- base from closing & opening equity
-    base = closing_df.rename(
-        columns={"Equity": "Closing Equity", "Currency": "Currency"}
-    ).copy()
+    base = closing_df.rename(columns={"Equity": "Closing Equity", "Currency": "Currency"}).copy()
     open_renamed = opening_df.rename(columns={"Equity": "Opening Equity"})
     base = base.merge(open_renamed[["Login", "Opening Equity"]], on="Login", how="left")
 
-    # Add summary info
     base = base.merge(summary_df, on="Login", how="left")
 
-    # start from list of accounts we actually care about (A / B / Hybrid lists)
     report = accounts_df.merge(base, on="Login", how="left")
 
-    # fill numeric columns
-    for col in [
-        "Closing Equity",
-        "Opening Equity",
-        "NET_DP_WD",
-        "ClosedVolume",
-        "Commission",
-        "Swap",
-    ]:
+    # Ensure numeric + defaults
+    for col in ["Closing Equity", "Opening Equity", "NET_DP_WD", "Credit", "ClosedVolume", "Commission", "Swap"]:
         if col in report.columns:
             report[col] = pd.to_numeric(report[col], errors="coerce").fillna(0.0)
         else:
             report[col] = 0.0
 
-    # Closed lots
+    # Keep raw equity (optional; helps debugging)
+    report["Opening Equity (Raw)"] = report["Opening Equity"]
+    report["Closing Equity (Raw)"] = report["Closing Equity"]
+
+    # APPLY YOUR RULE: negative opening/closing equity => 0
+    report["Opening Equity"] = report["Opening Equity"].clip(lower=0.0)
+    report["Closing Equity"] = report["Closing Equity"].clip(lower=0.0)
+
+    # Closed lots = Volume / 2
     report["Closed Lots"] = report["ClosedVolume"] / 2.0
 
-    # DP/WD (already net from Sheet 1)
+    # Net DP/WD from sheet 1 column E
     report["NET DP/WD"] = report["NET_DP_WD"]
 
-    # Optional split into Deposits / Withdrawals just for display
+    # Credit from sheet 1 column F
+    report["Credit"] = report["Credit"]
+
+    # Optional split deposit/withdrawal for display
     report["Deposit"] = np.where(report["NET DP/WD"] > 0, report["NET DP/WD"], 0.0)
     report["Withdrawal"] = np.where(report["NET DP/WD"] < 0, -report["NET DP/WD"], 0.0)
 
-    # NET PNL
+    # NET PNL (UPDATED)
     report["NET PNL USD"] = (
-        report["Closing Equity"] - report["Opening Equity"] - report["NET DP/WD"]
+        report["Closing Equity"]
+        - report["Opening Equity"]
+        - report["NET DP/WD"]
+        - report["Credit"]
     )
 
-    # NET PNL % vs Opening equity (abs)
+    # NET PNL % vs Opening equity (abs; but opening is already non-negative now)
     report["NET PNL %"] = np.where(
-        report["Opening Equity"].abs() > 0,
-        (report["NET PNL USD"] / report["Opening Equity"].abs()) * 100.0,
+        report["Opening Equity"] > 0,
+        (report["NET PNL USD"] / report["Opening Equity"]) * 100.0,
         0.0,
     )
 
-    # Attach switches info for reference only (book allocation done later)
+    # Attach switches info for reference only
     report["ShiftFromType"] = np.nan
     report["ShiftToType"] = np.nan
     report["ShiftEquity"] = np.nan
 
     if switches_df is not None and not switches_df.empty:
-        report = report.merge(
-            switches_df, on="Login", how="left", suffixes=("", "_sw")
-        )
-        # rename merged columns
+        report = report.merge(switches_df, on="Login", how="left", suffixes=("", "_sw"))
         report["ShiftFromType"] = report["FromType"]
         report["ShiftToType"] = report["ToType"]
         report["ShiftEquity"] = report["ShiftEquity"].astype(float)
-        # If there is a ToType → this becomes final Type
-        report["Type"] = np.where(
-            report["ShiftToType"].notna(), report["ShiftToType"], report["Type"]
-        )
+        report["Type"] = np.where(report["ShiftToType"].notna(), report["ShiftToType"], report["Type"])
 
     report["EOD Closing Equity Date"] = eod_label
 
@@ -344,6 +342,7 @@ def build_report(summary_df, closing_df, opening_df, accounts_df, switches_df, e
         "Currency",
         "Closed Lots",
         "NET DP/WD",
+        "Credit",
         "Opening Equity",
         "Closing Equity",
         "NET PNL USD",
@@ -356,6 +355,9 @@ def build_report(summary_df, closing_df, opening_df, accounts_df, switches_df, e
         "ShiftToType",
         "ShiftEquity",
         "EOD Closing Equity Date",
+        # Debug columns (keep at end; you can remove later if you want)
+        "Opening Equity (Raw)",
+        "Closing Equity (Raw)",
     ]
     report = report[final_cols].sort_values("Login").reset_index(drop=True)
     return report
@@ -367,6 +369,7 @@ def build_group_summary(account_df: pd.DataFrame) -> pd.DataFrame:
         .agg(
             Closed_Lots=("Closed Lots", "sum"),
             NET_DP_WD=("NET DP/WD", "sum"),
+            Credit=("Credit", "sum"),
             NET_PNL_USD=("NET PNL USD", "sum"),
             Opening_Equity=("Opening Equity", "sum"),
             Closing_Equity=("Closing Equity", "sum"),
@@ -380,12 +383,10 @@ def build_book_summary(account_df: pd.DataFrame, switches_df: pd.DataFrame) -> p
     """
     Aggregate P&L by Type (A-Book / B-Book / Hybrid).
 
-    If switches are provided we split the daily P&L between FROM and TO book
-    using ShiftEquity:
-
-        net_pnl        = full day P&L (as above)
-        pnl_new_book   = ClosingEquity - ShiftEquity
-        pnl_old_book   = net_pnl - pnl_new_book
+    Note: For switched accounts, we keep your original logic to split
+    P&L by ShiftEquity. (This split is based on equity movement, not
+    deposits/credit allocation. If you want deposit/credit to split too,
+    tell me and I’ll add it.)
     """
     rows = []
     switches_map = {}
@@ -397,20 +398,13 @@ def build_book_summary(account_df: pd.DataFrame, switches_df: pd.DataFrame) -> p
         net_pnl = r["NET PNL USD"]
         closed_lots = r["Closed Lots"]
         final_type = r["Type"]
-        opening = r["Opening Equity"]
         closing = r["Closing Equity"]
 
         sw = switches_map.get(login)
 
         if not sw:
-            # no switch → everything to final type
             rows.append(
-                {
-                    "Type": final_type,
-                    "Accounts": 1,
-                    "Closed_Lots": closed_lots,
-                    "NET_PNL_USD": net_pnl,
-                }
+                {"Type": final_type, "Accounts": 1, "Closed_Lots": closed_lots, "NET_PNL_USD": net_pnl}
             )
         else:
             from_type = sw["FromType"]
@@ -420,24 +414,8 @@ def build_book_summary(account_df: pd.DataFrame, switches_df: pd.DataFrame) -> p
             pnl_new = closing - shift_eq
             pnl_old = net_pnl - pnl_new
 
-            # old book (no account counted)
-            rows.append(
-                {
-                    "Type": from_type,
-                    "Accounts": 0,
-                    "Closed_Lots": 0.0,
-                    "NET_PNL_USD": pnl_old,
-                }
-            )
-            # new book (account belongs here)
-            rows.append(
-                {
-                    "Type": to_type,
-                    "Accounts": 1,
-                    "Closed_Lots": closed_lots,
-                    "NET_PNL_USD": pnl_new,
-                }
-            )
+            rows.append({"Type": from_type, "Accounts": 0, "Closed_Lots": 0.0, "NET_PNL_USD": pnl_old})
+            rows.append({"Type": to_type, "Accounts": 1, "Closed_Lots": closed_lots, "NET_PNL_USD": pnl_new})
 
     contrib = pd.DataFrame(rows)
     book = (
@@ -459,7 +437,7 @@ def load_lp_breakdown_file(file: BytesIO) -> pd.DataFrame:
       - LPName
       - OpeningEquity
       - ClosingEquity
-      - NetDPWD     (Net Deposit – Withdrawal)
+      - NetDPWD
 
     LP_PnL = ClosingEquity − OpeningEquity − NetDPWD
     """
@@ -469,7 +447,7 @@ def load_lp_breakdown_file(file: BytesIO) -> pd.DataFrame:
     else:
         df = pd.read_excel(file)
 
-    lower = {c.lower(): c for c in df.columns}
+    lower = {str(c).lower(): c for c in df.columns}
 
     def pick(*candidates):
         for c in candidates:
@@ -540,7 +518,7 @@ with c1:
         "Sheet 1 – Summary / Transactions",
         type=["xlsx", "xls", "csv"],
         key="summary",
-        help="MT5 summary: includes NET DP/WD (col E), Volume (H), Commission (I), Swap (K).",
+        help="Uses: NET DP/WD (col E), Credit (col F), Volume/Lots (col H -> /2).",
     )
 
 with c2:
@@ -548,7 +526,7 @@ with c2:
         "Sheet 2 – Closing Equity (EOD for report period)",
         type=["xlsx", "xls"],
         key="closing",
-        help="Daily equity snapshot for the closing date.",
+        help="Closing equity from column J.",
     )
 
 with c3:
@@ -556,7 +534,7 @@ with c3:
         "Sheet 3 – Opening Equity (previous EOD)",
         type=["xlsx", "xls"],
         key="opening",
-        help="Equity snapshot for previous EOD (used as opening equity).",
+        help="Opening equity from column J.",
     )
 
 st.markdown("#### Book-wise account lists")
@@ -661,14 +639,14 @@ if st.button("🚀 Generate report", use_container_width=True):
                 st.markdown('<div class="metric-card">', unsafe_allow_html=True)
                 st.markdown('<div class="metric-label">Closed lots</div>', unsafe_allow_html=True)
                 st.markdown(f'<div class="metric-value">{total_closed_lots:,.2f}</div>', unsafe_allow_html=True)
-                st.markdown('<div class="metric-sub">From Sheet-1 volume / 2</div>', unsafe_allow_html=True)
+                st.markdown('<div class="metric-sub">From Sheet-1 col H / 2</div>', unsafe_allow_html=True)
                 st.markdown('</div>', unsafe_allow_html=True)
 
             with k3:
                 st.markdown('<div class="metric-card">', unsafe_allow_html=True)
                 st.markdown('<div class="metric-label">Net client P&L</div>', unsafe_allow_html=True)
                 st.markdown(f'<div class="metric-value">{net_pnl_total:,.2f}</div>', unsafe_allow_html=True)
-                st.markdown('<div class="metric-sub">All books combined</div>', unsafe_allow_html=True)
+                st.markdown('<div class="metric-sub">Closing - Opening - Net D/W - Credit</div>', unsafe_allow_html=True)
                 st.markdown('</div>', unsafe_allow_html=True)
 
             with k4:
@@ -689,7 +667,6 @@ if st.button("🚀 Generate report", use_container_width=True):
                 st.markdown('<div class="metric-sub">Based on NET PNL USD</div>', unsafe_allow_html=True)
                 st.markdown('</div>', unsafe_allow_html=True)
 
-            # Simple bar chart
             chart_data = pd.DataFrame(
                 {"Side": ["Profit", "Loss"], "Amount": [profit_abs, loss_abs]}
             ).set_index("Side")
@@ -734,6 +711,7 @@ if st.button("🚀 Generate report", use_container_width=True):
                 "NET PNL %",
                 "Closed Lots",
                 "NET DP/WD",
+                "Credit",
             ]
 
             with t1:
@@ -795,28 +773,13 @@ if st.button("🚀 Generate report", use_container_width=True):
                 group_df.to_excel(writer, index=False, sheet_name="Groups")
                 book_df.to_excel(writer, index=False, sheet_name="Books")
 
-                # A-book vs LP sheet (with brokerage formula)
                 abook_lp_rows = []
-
-                abook_lp_rows.append(
-                    {"Metric": "Client_A_Book_PnL", "Value": pnl_a}
-                )
+                abook_lp_rows.append({"Metric": "Client_A_Book_PnL", "Value": pnl_a})
                 if lp_table is not None:
                     for _, row in lp_table.iterrows():
-                        abook_lp_rows.append(
-                            {
-                                "Metric": f"LP_{row['LPName']}_PnL",
-                                "Value": row["LP_PnL"],
-                            }
-                        )
+                        abook_lp_rows.append({"Metric": f"LP_{row['LPName']}_PnL", "Value": row["LP_PnL"]})
                 abook_lp_rows.append({"Metric": "Total_LP_PnL", "Value": total_lp_pnl})
-                # Brokerage = LP_PnL - Client_A_Book_PnL
-                abook_lp_rows.append(
-                    {
-                        "Metric": "Brokerage_PnL",
-                        "Value": brokerage_pnl,
-                    }
-                )
+                abook_lp_rows.append({"Metric": "Brokerage_PnL", "Value": brokerage_pnl})
 
                 abook_lp_df = pd.DataFrame(abook_lp_rows)
                 abook_lp_df.to_excel(writer, index=False, sheet_name="Abook_vs_LP")
