@@ -203,20 +203,14 @@ def _read_accounts_file(file: BytesIO) -> pd.DataFrame:
     Book-wise account lists:
     - Login is column A (index 0)
     - Group is column E (index 4)  ✅ as per your requirement
-    If a header-based 'Group' exists, we still support it, but priority is column E.
     """
     raw = _read_excel_or_csv(file)
 
     if raw.shape[1] < 1:
         raise ValueError("Accounts file looks empty.")
-    if raw.shape[1] < 5:
-        # still allow, but group will be blank
-        pass
 
-    # Login from col A
     login_series = pd.to_numeric(raw.iloc[:, 0], errors="coerce").astype("Int64")
 
-    # Group from col E (index 4)
     if raw.shape[1] >= 5:
         group_series = raw.iloc[:, 4].astype(str).fillna("")
     else:
@@ -271,6 +265,7 @@ def build_report(summary_df, closing_df, opening_df, accounts_df, eod_label: str
 
     report["EOD Closing Equity Date"] = eod_label
 
+    # NOTE: We keep Type/OrigType internally, but later we will HIDE it in the Accounts sheet export & UI.
     final_cols = [
         "Login", "Group", "OrigType", "Type", "Currency",
         "Closed Lots", "NET DP/WD", "Credit",
@@ -427,7 +422,6 @@ with cb3:
 
 st.markdown("---")
 
-
 # =========================================================
 # RUN
 # =========================================================
@@ -501,7 +495,9 @@ if st.button("🚀 Generate report", use_container_width=True):
             chart_data = pd.DataFrame({"Side": ["Profit", "Loss"], "Amount": [total_profit, abs(total_loss)]}).set_index("Side")
             st.bar_chart(chart_data, height=260)
 
-            # Tables
+            # =================================================
+            # FULL ACCOUNT TABLE (Type removed from UI)
+            # =================================================
             st.markdown(
                 """
 <div class="section">
@@ -513,8 +509,11 @@ if st.button("🚀 Generate report", use_container_width=True):
 """,
                 unsafe_allow_html=True,
             )
-            st.dataframe(account_df, use_container_width=True)
+            st.dataframe(account_df.drop(columns=["Type", "OrigType"], errors="ignore"), use_container_width=True)
 
+            # =================================================
+            # BOOK SUMMARY (still uses Type)
+            # =================================================
             st.markdown(
                 """
 <div class="section">
@@ -535,6 +534,9 @@ if st.button("🚀 Generate report", use_container_width=True):
             result_label = "profit" if total_books_pnl >= 0 else "loss"
             st.markdown(f"**Client P&L across all books: {total_books_pnl:,.2f} ({result_label})**")
 
+            # =================================================
+            # TOPS (Type removed)
+            # =================================================
             st.markdown(
                 """
 <div class="section">
@@ -548,7 +550,7 @@ if st.button("🚀 Generate report", use_container_width=True):
             )
 
             show_cols = [
-                "Login", "Group", "Type",
+                "Login", "Group",
                 "Opening Equity", "Closing Equity",
                 "NET DP/WD", "Credit",
                 "Closed Lots", "NET PNL USD", "NET PNL %"
@@ -557,10 +559,16 @@ if st.button("🚀 Generate report", use_container_width=True):
             t1, t2 = st.columns(2)
             with t1:
                 st.markdown("**Top 10 gainer accounts**")
-                st.dataframe(account_df.sort_values("NET PNL USD", ascending=False).head(10)[show_cols], use_container_width=True)
+                st.dataframe(
+                    account_df.sort_values("NET PNL USD", ascending=False).head(10)[show_cols],
+                    use_container_width=True,
+                )
             with t2:
                 st.markdown("**Top 10 loser accounts**")
-                st.dataframe(account_df.sort_values("NET PNL USD", ascending=True).head(10)[show_cols], use_container_width=True)
+                st.dataframe(
+                    account_df.sort_values("NET PNL USD", ascending=True).head(10)[show_cols],
+                    use_container_width=True,
+                )
 
             g1, g2 = st.columns(2)
             with g1:
@@ -570,7 +578,9 @@ if st.button("🚀 Generate report", use_container_width=True):
                 st.markdown("**Top 10 loss groups**")
                 st.dataframe(group_df.sort_values("NET_PNL_USD", ascending=True).head(10), use_container_width=True)
 
-            # LP Brokerage
+            # =================================================
+            # A-BOOK VS LP BROKERAGE
+            # =================================================
             st.markdown(
                 """
 <div class="section">
@@ -599,7 +609,9 @@ if st.button("🚀 Generate report", use_container_width=True):
             brokerage_pnl = total_lp_pnl - pnl_a
             st.markdown(f"- **Brokerage P&L = {total_lp_pnl:,.2f} − {pnl_a:,.2f} = {brokerage_pnl:,.2f}**")
 
-            # Download
+            # =================================================
+            # DOWNLOAD EXCEL (Type removed from Accounts sheet)
+            # =================================================
             st.markdown(
                 """
 <div class="section">
@@ -614,7 +626,8 @@ if st.button("🚀 Generate report", use_container_width=True):
 
             output = BytesIO()
             with pd.ExcelWriter(output, engine="openpyxl") as writer:
-                account_df.to_excel(writer, index=False, sheet_name="Accounts")
+                accounts_export = account_df.drop(columns=["Type", "OrigType"], errors="ignore")
+                accounts_export.to_excel(writer, index=False, sheet_name="Accounts")
                 group_df.to_excel(writer, index=False, sheet_name="Groups")
                 book_df.to_excel(writer, index=False, sheet_name="Books")
 
