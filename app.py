@@ -4,7 +4,7 @@ import numpy as np
 from io import BytesIO
 
 # =========================================================
-# PAGE CONFIG & UNIQUE UI (LIGHT / PREMIUM / DISTINCT)
+# PAGE CONFIG & UNIQUE UI (LIGHT / PREMIUM)
 # =========================================================
 st.set_page_config(
     page_title="Client P&L Studio",
@@ -15,7 +15,6 @@ st.set_page_config(
 st.markdown(
     """
 <style>
-/* ============ App canvas ============ */
 body, .main{
   background:
     radial-gradient(circle at 10% 0%, rgba(99,102,241,0.08) 0, rgba(99,102,241,0) 40%),
@@ -27,7 +26,6 @@ body, .main{
 .block-container{max-width:1500px; padding-top:1.2rem; padding-bottom:3rem;}
 h1,h2,h3,h4{color:#0f172a;}
 
-/* ============ Top header / hero ============ */
 .hero{
   border-radius:26px;
   padding:1.35rem 1.6rem;
@@ -44,7 +42,6 @@ h1,h2,h3,h4{color:#0f172a;}
   inset:-120px -120px auto auto;
   width:240px; height:240px;
   background: radial-gradient(circle, rgba(99,102,241,.35), rgba(99,102,241,0));
-  filter: blur(0px);
 }
 .hero:after{
   content:"";
@@ -67,7 +64,6 @@ h1,h2,h3,h4{color:#0f172a;}
 .hero-title{margin:.7rem 0 .2rem 0; font-size:2rem; font-weight:800;}
 .hero-sub{margin:0; color:rgba(248,250,252,.75); max-width:920px; line-height:1.6;}
 
-/* ============ Section headers ============ */
 .section{
   margin-top:1.2rem;
   padding:1rem 1rem;
@@ -90,8 +86,6 @@ h1,h2,h3,h4{color:#0f172a;}
   color:#3730a3;
   font-size:.8rem;
 }
-
-/* ============ Metric cards ============ */
 .metric{
   background:#ffffff;
   border:1px solid rgba(15,23,42,0.08);
@@ -102,16 +96,14 @@ h1,h2,h3,h4{color:#0f172a;}
 .metric .k{font-size:.75rem; letter-spacing:.12em; text-transform:uppercase; color:#64748b;}
 .metric .v{font-size:1.4rem; font-weight:800; color:#0f172a; margin-top:.2rem;}
 .metric .s{font-size:.78rem; color:#64748b; margin-top:.2rem;}
+.small-note{color:#64748b; font-size:.86rem;}
 
-/* ============ Sidebar ============ */
 [data-testid="stSidebar"]{
   background: radial-gradient(circle at 0 0, #0b1220 0, #0b1220 55%, #0b1220 100%);
   border-right: 1px solid rgba(255,255,255,0.08);
 }
 [data-testid="stSidebar"] *{color:#f8fafc !important;}
-[data-testid="stSidebar"] .stFileUploader label{color:#f8fafc !important;}
 
-/* ============ Tables ============ */
 [data-testid="stDataFrame"]{
   border-radius:14px;
   overflow:hidden;
@@ -119,17 +111,10 @@ h1,h2,h3,h4{color:#0f172a;}
   box-shadow: 0 10px 30px rgba(2,6,23,0.05);
 }
 
-/* ============ Inputs ============ */
 .stTextInput > div > div > input,
 .stNumberInput input,
-.stDateInput input{
-  border-radius:12px !important;
-}
-.stButton>button{
-  border-radius:14px !important;
-  font-weight:700;
-}
-.small-note{color:#64748b; font-size:.86rem;}
+.stDateInput input{ border-radius:12px !important; }
+.stButton>button{ border-radius:14px !important; font-weight:700; }
 </style>
 """,
     unsafe_allow_html=True,
@@ -142,9 +127,8 @@ def _read_excel_or_csv(file: BytesIO) -> pd.DataFrame:
     name = file.name.lower()
     if name.endswith(".csv"):
         return pd.read_csv(file)
-    # MT5 exports sometimes have 2 header lines
     try:
-        return pd.read_excel(file, header=2)
+        return pd.read_excel(file, header=2)  # MT5 exports often have 2 header lines
     except Exception:
         return pd.read_excel(file)
 
@@ -215,22 +199,31 @@ def load_equity_sheet(file: BytesIO) -> pd.DataFrame:
     return out
 
 def _read_accounts_file(file: BytesIO) -> pd.DataFrame:
-    df = _read_excel_or_csv(file)
-    lower = {str(c).strip().lower(): c for c in df.columns}
+    """
+    Book-wise account lists:
+    - Login is column A (index 0)
+    - Group is column E (index 4)  ✅ as per your requirement
+    If a header-based 'Group' exists, we still support it, but priority is column E.
+    """
+    raw = _read_excel_or_csv(file)
 
-    if "login" in lower and "Login" not in df.columns:
-        df = df.rename(columns={lower["login"]: "Login"})
-    if "group" in lower and "Group" not in df.columns:
-        df = df.rename(columns={lower["group"]: "Group"})
+    if raw.shape[1] < 1:
+        raise ValueError("Accounts file looks empty.")
+    if raw.shape[1] < 5:
+        # still allow, but group will be blank
+        pass
 
-    if "Login" not in df.columns:
-        df = df.rename(columns={df.columns[0]: "Login"})
-    if "Group" not in df.columns:
-        df["Group"] = ""  # stays blank if your file doesn't include group
+    # Login from col A
+    login_series = pd.to_numeric(raw.iloc[:, 0], errors="coerce").astype("Int64")
 
-    out = df[["Login", "Group"]].copy()
-    out["Login"] = pd.to_numeric(out["Login"], errors="coerce").astype("Int64")
-    out["Group"] = out["Group"].fillna("").astype(str)
+    # Group from col E (index 4)
+    if raw.shape[1] >= 5:
+        group_series = raw.iloc[:, 4].astype(str).fillna("")
+    else:
+        group_series = pd.Series([""] * len(raw), dtype="object")
+
+    out = pd.DataFrame({"Login": login_series, "Group": group_series})
+    out["Group"] = out["Group"].replace(["nan", "None"], "").fillna("").astype(str).str.strip()
     return out
 
 def load_book_accounts(file: BytesIO, book_type: str) -> pd.DataFrame:
@@ -246,6 +239,7 @@ def build_report(summary_df, closing_df, opening_df, accounts_df, eod_label: str
     """
     base = closing_df.rename(columns={"Equity": "Closing Equity"}).copy()
     open_df = opening_df.rename(columns={"Equity": "Opening Equity"})
+
     base = base.merge(open_df[["Login", "Opening Equity"]], on="Login", how="left")
     base = base.merge(summary_df, on="Login", how="left")
 
@@ -289,7 +283,6 @@ def build_report(summary_df, closing_df, opening_df, accounts_df, eod_label: str
     return report[final_cols].sort_values("Login").reset_index(drop=True)
 
 def build_group_summary(account_df: pd.DataFrame) -> pd.DataFrame:
-    # ✅ group must be included in groupby to be visible
     return (
         account_df.groupby(["Group", "Type"], dropna=False)
         .agg(
@@ -336,13 +329,12 @@ def load_lp_breakdown_file(file: BytesIO) -> pd.DataFrame:
 
 
 # =========================================================
-# SIDEBAR – OPTIONAL LP PANEL (kept)
+# SIDEBAR – OPTIONAL LP PANEL
 # =========================================================
 with st.sidebar:
     st.markdown("## 🧾 P&L Studio")
-    st.caption("Clean client P&L + Book & Group summaries. Optional LP brokerage panel below.")
+    st.caption("Client P&L + Group/Book summaries. Optional LP brokerage below.")
     st.divider()
-
     st.markdown("### 🏦 A-Book LP P&L (optional)")
     st.caption("Brokerage P&L = Total LP P&L − Client A-Book P&L.")
     lp_file = st.file_uploader("LP breakdown file (XLSX / CSV)", type=["xlsx", "xls", "csv"], key="lp_file")
@@ -357,8 +349,8 @@ st.markdown(
   <div class="hero-badge">⚡ MT5 • Client P&L Studio</div>
   <div class="hero-title">Client P&L Monitoring</div>
   <p class="hero-sub">
-    Upload MT5 exports to generate account-wise, group-wise and book-wise P&L.
-    Net P&L = Closing − Opening − Net D/W − Credit (Equity < 0 is treated as 0).
+    Net P&L = Closing − Opening − Net D/W − Credit (Equity &lt; 0 is treated as 0).
+    Group is taken from Book-wise account list <b>Column E</b>.
   </p>
 </div>
 """,
@@ -366,16 +358,16 @@ st.markdown(
 )
 
 # =========================================================
-# FILE UPLOADS (BOOK SWITCH REMOVED)
+# FILE UPLOADS
 # =========================================================
 st.markdown(
     """
 <div class="section">
   <div class="section-title">
     <h2>1) Upload MT5 reports</h2>
-    <span class="pill">Files in → Report out</span>
+    <span class="pill">Required</span>
   </div>
-  <div class="small-note">Required: Summary + Closing Equity + Opening Equity. Book account lists: at least one.</div>
+  <div class="small-note">Required: Summary + Closing Equity + Opening Equity.</div>
 </div>
 """,
     unsafe_allow_html=True,
@@ -415,9 +407,11 @@ st.markdown(
 <div class="section">
   <div class="section-title">
     <h2>2) Book-wise account lists</h2>
-    <span class="pill">A-Book / B-Book / Hybrid</span>
+    <span class="pill">Login(A) + Group(E)</span>
   </div>
-  <div class="small-note">Your accounts file must contain columns: Login, Group (optional). If Group not provided, it will stay blank.</div>
+  <div class="small-note">
+    Group will be read from <b>Column E</b> of these files (Excel column E = index 4).
+  </div>
 </div>
 """,
     unsafe_allow_html=True,
@@ -465,9 +459,7 @@ if st.button("🚀 Generate report", use_container_width=True):
                 group_df = build_group_summary(account_df)
                 book_df = build_book_summary(account_df)
 
-            # =================================================
-            # KPI OVERVIEW
-            # =================================================
+            # KPI
             st.markdown(
                 """
 <div class="section">
@@ -491,45 +483,25 @@ if st.button("🚀 Generate report", use_container_width=True):
             k1, k2, k3, k4 = st.columns(4)
             with k1:
                 st.markdown(f"""
-<div class="metric">
-  <div class="k">Clients</div>
-  <div class="v">{total_clients:,}</div>
-  <div class="s">Unique logins</div>
-</div>
+<div class="metric"><div class="k">Clients</div><div class="v">{total_clients:,}</div><div class="s">Unique logins</div></div>
 """, unsafe_allow_html=True)
             with k2:
                 st.markdown(f"""
-<div class="metric">
-  <div class="k">Closed lots</div>
-  <div class="v">{total_closed_lots:,.2f}</div>
-  <div class="s">Sheet-1 col H / 2</div>
-</div>
+<div class="metric"><div class="k">Closed lots</div><div class="v">{total_closed_lots:,.2f}</div><div class="s">Sheet-1 col H / 2</div></div>
 """, unsafe_allow_html=True)
             with k3:
                 st.markdown(f"""
-<div class="metric">
-  <div class="k">Total Credit</div>
-  <div class="v">{total_credit:,.2f}</div>
-  <div class="s">Sheet-1 col F</div>
-</div>
+<div class="metric"><div class="k">Total Credit</div><div class="v">{total_credit:,.2f}</div><div class="s">Sheet-1 col F</div></div>
 """, unsafe_allow_html=True)
             with k4:
                 st.markdown(f"""
-<div class="metric">
-  <div class="k">Net client P&L</div>
-  <div class="v">{net_pnl_total:,.2f}</div>
-  <div class="s">Closing − Opening − Net D/W − Credit</div>
-</div>
+<div class="metric"><div class="k">Net client P&L</div><div class="v">{net_pnl_total:,.2f}</div><div class="s">Closing − Opening − Net D/W − Credit</div></div>
 """, unsafe_allow_html=True)
 
-            chart_data = pd.DataFrame(
-                {"Side": ["Profit", "Loss"], "Amount": [total_profit, abs(total_loss)]}
-            ).set_index("Side")
+            chart_data = pd.DataFrame({"Side": ["Profit", "Loss"], "Amount": [total_profit, abs(total_loss)]}).set_index("Side")
             st.bar_chart(chart_data, height=260)
 
-            # =================================================
-            # TABLES
-            # =========================================================
+            # Tables
             st.markdown(
                 """
 <div class="section">
@@ -585,16 +557,10 @@ if st.button("🚀 Generate report", use_container_width=True):
             t1, t2 = st.columns(2)
             with t1:
                 st.markdown("**Top 10 gainer accounts**")
-                st.dataframe(
-                    account_df.sort_values("NET PNL USD", ascending=False).head(10)[show_cols],
-                    use_container_width=True,
-                )
+                st.dataframe(account_df.sort_values("NET PNL USD", ascending=False).head(10)[show_cols], use_container_width=True)
             with t2:
                 st.markdown("**Top 10 loser accounts**")
-                st.dataframe(
-                    account_df.sort_values("NET PNL USD", ascending=True).head(10)[show_cols],
-                    use_container_width=True,
-                )
+                st.dataframe(account_df.sort_values("NET PNL USD", ascending=True).head(10)[show_cols], use_container_width=True)
 
             g1, g2 = st.columns(2)
             with g1:
@@ -604,9 +570,7 @@ if st.button("🚀 Generate report", use_container_width=True):
                 st.markdown("**Top 10 loss groups**")
                 st.dataframe(group_df.sort_values("NET_PNL_USD", ascending=True).head(10), use_container_width=True)
 
-            # =================================================
-            # A-BOOK VS LP BROKERAGE
-            # =================================================
+            # LP Brokerage
             st.markdown(
                 """
 <div class="section">
@@ -635,9 +599,7 @@ if st.button("🚀 Generate report", use_container_width=True):
             brokerage_pnl = total_lp_pnl - pnl_a
             st.markdown(f"- **Brokerage P&L = {total_lp_pnl:,.2f} − {pnl_a:,.2f} = {brokerage_pnl:,.2f}**")
 
-            # =================================================
-            # DOWNLOAD EXCEL
-            # =================================================
+            # Download
             st.markdown(
                 """
 <div class="section">
